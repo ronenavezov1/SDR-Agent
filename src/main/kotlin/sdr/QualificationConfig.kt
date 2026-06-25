@@ -13,6 +13,11 @@ data class QualificationConfig(
     val requireCommercialIntent: Boolean = true,
     /** Maximum follow-up emails before giving up. */
     val maxFollowUps: Int = 3,
+    /**
+     * Maximum times an email draft can be rejected and rewritten before the best attempt is sent.
+     * Exists to prevent an infinite writer↔reviewer loop while still allowing meaningful revision.
+     */
+    val maxEmailDraftRetries: Int = 3,
     /** Keywords that trigger mandatory human escalation (pricing/discount discussions). */
     val pricingKeywords: List<String> = listOf(
         "price", "pricing", "cost", "discount", "cheap", "expensive",

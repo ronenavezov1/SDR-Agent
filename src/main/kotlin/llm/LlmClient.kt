@@ -5,6 +5,7 @@ import org.example.agent.AgentCapability
 
 interface LlmClient {
     suspend fun sendMessage(
+        agentId: String,
         systemPrompt: String,
         history: List<AgentHistory>,
         availableCapabilities: List<AgentCapability>

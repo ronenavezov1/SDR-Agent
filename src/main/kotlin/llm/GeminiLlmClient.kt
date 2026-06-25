@@ -26,13 +26,12 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
         capabilities: List<AgentCapability>
     ): Any = GeminiPayload(system, history, capabilities)
 
-    override suspend fun executeNetworkCall(payload: Any): LlmResponse {
+    override suspend fun executeNetworkCall(agentId: String, payload: Any): LlmResponse {
         val req = payload as GeminiPayload
         return withContext(Dispatchers.IO) {
             val contents = toContents(req.history)
 
-            // LOG: show the exact Content sequence sent to Gemini
-            println("\n+----- Gemini Request (${contents.size} content items) -----")
+            println("\n+===== [$agentId] Gemini Request (${contents.size} content items) =====")
             contents.forEachIndexed { i, c ->
                 val role = c.role().orElse("?")
                 val parts = c.parts().orElse(emptyList()).joinToString(" | ") { p ->
@@ -48,7 +47,7 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
                 }
                 println("|  [$i] role=$role -> $parts")
             }
-            println("+----------------------------------------------------------")
+            println("+==============================================================")
 
             val config = buildConfig(req.system, req.capabilities)
             val response = client.models.generateContent(modelName, contents, config)
@@ -64,7 +63,7 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
             val textReply = if (funcCalls.isEmpty()) response.text()?.takeIf { it.isNotBlank() } else null
 
             // LOG: show what Gemini returned
-            println("+-- Gemini Response ------------------------------------------")
+            println("+--- [$agentId] Gemini Response --------------------------------")
             if (funcCalls.isNotEmpty()) {
                 funcCalls.forEach { fc ->
                     println("|  FUNC_CALL -> ${fc.functionName}(${fc.arguments})")
@@ -72,7 +71,7 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
             } else {
                 println("|  TEXT -> \"${textReply?.take(120)?.replace('\n', ' ')}\"")
             }
-            println("+-------------------------------------------------------------\n")
+            println("+--------------------------------------------------------------\n")
 
             LlmResponse(textReply = textReply, functionCalls = funcCalls)
         }

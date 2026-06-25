@@ -1,10 +1,25 @@
 package org.example.sdr
 
-enum class LeadStatus {
-    NEW,              // Lead just arrived, no outreach sent yet
-    AWAITING_REPLY,   // Outreach or follow-up sent, waiting for lead to respond
-    QUALIFYING,       // Reply received, extracting qualification data
-    ESCALATED_HUMAN,  // Waiting for a human to review before proceeding
-    QUALIFIED,        // All criteria met — terminal success state
-    DISQUALIFIED      // Does not meet criteria — terminal failure state
+/**
+ * Sealed interface — exhaustive when-expressions always enforced by the compiler.
+ *
+ * [Escalated] carries the live escalation data so the status and its context
+ * are always co-located; no separate nullable field needed on [Lead].
+ */
+sealed interface LeadStatus {
+    /** Lead arrived, no outreach sent yet. */
+    data object New : LeadStatus
+
+    /** Outreach or follow-up sent — waiting for the lead to reply. */
+    data object AwaitingClientResponse : LeadStatus
+
+    /** Does not meet qualification criteria — terminal. */
+    data object Disqualified : LeadStatus
+
+    /** All criteria met, booking link sent — terminal. */
+    data object Qualified : LeadStatus
+
+    /** Waiting for a human reviewer before the agent can continue. */
+    data class Escalated(val escalation: HumanEscalation) : LeadStatus
 }
+

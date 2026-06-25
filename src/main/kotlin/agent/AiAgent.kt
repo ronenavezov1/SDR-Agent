@@ -2,6 +2,7 @@ package org.example.agent
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withTimeout
+import org.example.debug.DebugLogger
 import org.example.llm.FunctionCall
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -75,13 +76,7 @@ class AiAgent(private val config: AgentConfig) {
      * @param onComplete Suspend callback invoked with the agent's final reply.
      */
     suspend fun processInput(input: String) : String{
-        // ── Busy guard ────────────────────────────────────────────────────────
-        // Only active states (Thinking / Working) block new input.
-        // Error is a terminal state from a *previous* request — the agent is no
-        // longer doing anything, so we reset it to Idle and let the new input
-        // through (giving the user a chance to recover without calling clearHistory).
         if (_status is AgentStatus.Error) {
-            println("⚠️ [${config.agentId}] Recovering from error state — resetting to Idle.")
             _status = AgentStatus.Idle
         }
 
@@ -89,7 +84,7 @@ class AiAgent(private val config: AgentConfig) {
             val statusDesc = when (val s = _status) {
                 is AgentStatus.Thinking -> "thinking"
                 is AgentStatus.Working  -> "working on: ${s.toolName}"
-                else                    -> "busy" // unreachable
+                else                    -> "busy"
             }
             val window = _history.takeLast(config.maxHistorySize)
             val historyDump = buildString {
@@ -109,6 +104,8 @@ class AiAgent(private val config: AgentConfig) {
             return "🚫 Agent '${config.agentId}' is busy ($statusDesc) and cannot accept new input.\n$historyDump"
         }
 
+        DebugLogger.agentStart(config.agentId, input)
+
         _history.add(AgentHistory.UserInput(text = input))
         val result = try {
             withTimeout(config.timeoutMs.milliseconds) {
@@ -116,10 +113,12 @@ class AiAgent(private val config: AgentConfig) {
             }
         } catch (e: Exception) {
             val msg = "⏱️ [${config.agentId}] Request timed out or failed: ${e.message}"
-            println(msg)
             _status = AgentStatus.Idle
             msg
         }
+        clearHistory()
+
+        DebugLogger.agentDone(config.agentId, result)
         return result
     }
 
@@ -163,8 +162,7 @@ class AiAgent(private val config: AgentConfig) {
     ): String? {
         if (_history.isEmpty()) return null
 
-        println("\n🗜️  [${config.agentId}] Starting history compression " +
-                "(${_history.size} items → summary)…")
+        println("\n🗜️  [${config.agentId}] Compressing history (${_history.size} items)…")
 
         // ── 1. Build a readable transcript of the most recent N items ─────────
         val window = _history.takeLast(maxItems)
@@ -186,6 +184,7 @@ class AiAgent(private val config: AgentConfig) {
         return try {
             val summaryText = withTimeout(timeoutMs.milliseconds) {
                 val response = config.llmClient.sendMessage(
+                    agentId               = config.agentId,
                     systemPrompt = """
                         You are a memory compression assistant.
                         You will receive a conversation transcript.
@@ -206,12 +205,9 @@ class AiAgent(private val config: AgentConfig) {
             _history.clear()
             _history.add(AgentHistory.Summary(text = summaryText))
 
-            println("✅ [${config.agentId}] History compressed to 1 summary entry.")
             summaryText
 
         } catch (e: Exception) {
-            // Timeout or any LLM error — leave history untouched (fail-safe)
-            println("⚠️  [${config.agentId}] Summarisation failed: ${e.message}. History unchanged.")
             null
         }
     }
@@ -235,7 +231,6 @@ class AiAgent(private val config: AgentConfig) {
      */
     private suspend fun runReactLoop(depth: Int): String {
 
-        // ── Infinite-loop guard ───────────────────────────────────────────────
         if (depth > config.maxDepth) {
             val msg = "[${config.agentId}] Aborted: reached maximum reasoning depth."
             _history.add(AgentHistory.SystemEvent(msg))
@@ -243,46 +238,42 @@ class AiAgent(private val config: AgentConfig) {
             return msg
         }
 
+        DebugLogger.reactLoop(config.agentId, depth)
         _status = AgentStatus.Thinking
 
-        // Merge tools + actions into one list — the LLM adapter converts them
-        // into a JSON FunctionDeclaration array sent along with the request.
         val capabilities = (config.tools.values + config.actions.values).toList()
 
-        // ── Ask the LLM what to do next ───────────────────────────────────────
+        DebugLogger.llmRequest(
+            agentId         = config.agentId,
+            historySize     = _history.size,
+            capabilityNames = capabilities.map { it.name }
+        )
+
         val response = config.llmClient.sendMessage(
+            agentId               = config.agentId,
             systemPrompt          = config.systemPrompt,
             history               = _history.takeLast(config.maxHistorySize),
             availableCapabilities = capabilities
         )
 
-        println("▶ [${config.agentId}] LLM → " +
-                "text=\"${response.textReply?.take(80)}\", " +
-                "funcCalls=${response.functionCalls.map { it.functionName }}")
+        DebugLogger.llmResponse(
+            agentId       = config.agentId,
+            textPreview   = response.textReply,
+            functionCalls = response.functionCalls.map { it.functionName }
+        )
 
-        // ── Scenario A: The LLM wants to call one or more capabilities ────────
         if (response.functionCalls.isNotEmpty()) {
-
             _status = AgentStatus.Working(
                 response.functionCalls.joinToString(", ") { it.functionName }
             )
-
-            // 1. Record every function-call request the LLM made
             response.functionCalls.forEach { call ->
                 _history.add(AgentHistory.ToolCallRequest(call.functionName, call.arguments))
             }
-
-            // 2. Execute all tool/action calls sequentially
             val results = response.functionCalls.map { call -> executeCapabilitySafely(call) }
-
-            // 3. Record all results before looping back to the LLM
             results.forEach { _history.add(it) }
-
-            // 4. Recurse: give the LLM the results so it can continue reasoning
             return runReactLoop(depth + 1)
         }
 
-        // ── Scenario B: The LLM returned a final text answer ─────────────────
         val finalText = response.textReply
             ?: "Error: LLM returned neither text nor a function call."
 
@@ -291,18 +282,11 @@ class AiAgent(private val config: AgentConfig) {
         return finalText
     }
 
-    /**
-     * Executes a single capability (Tool or Action) and wraps it in try-catch.
-     *
-     * If the tool throws, the exception is converted into an error string that
-     * is fed back to the LLM.  This lets the LLM recover gracefully (e.g. retry
-     * with different arguments) instead of crashing the whole agent.
-     *
-     * @param call The function call the LLM requested (name + arguments).
-     */
     private suspend fun executeCapabilitySafely(call: FunctionCall): AgentHistory.ToolExecutionResult {
         val tool   = config.tools[call.functionName]
         val action = config.actions[call.functionName]
+
+        DebugLogger.toolCall(config.agentId, call.functionName, call.arguments)
 
         return try {
             val resultText = when {
@@ -310,15 +294,18 @@ class AiAgent(private val config: AgentConfig) {
                 action != null -> action.perform(config.agentId, call.arguments)
                 else           -> "Error: capability '${call.functionName}' is not registered."
             }
+            DebugLogger.toolResult(config.agentId, call.functionName, resultText, isSuccess = true)
             AgentHistory.ToolExecutionResult(
                 toolName   = call.functionName,
                 resultData = resultText,
                 isSuccess  = tool != null || action != null
             )
         } catch (e: Exception) {
+            val errMsg = "Execution error in '${call.functionName}': ${e.message}"
+            DebugLogger.toolResult(config.agentId, call.functionName, errMsg, isSuccess = false)
             AgentHistory.ToolExecutionResult(
                 toolName   = call.functionName,
-                resultData = "Execution error in '${call.functionName}': ${e.message}",
+                resultData = errMsg,
                 isSuccess  = false
             )
         }

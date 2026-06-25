@@ -19,7 +19,7 @@ class OpenAiLlmClient(apiKey: String, modelName: String) :
         )
     }
 
-    override suspend fun executeNetworkCall(payload: Any): LlmResponse {
+    override suspend fun executeNetworkCall(agentId: String, payload: Any): LlmResponse {
         // כאן מתבצעת קריאת ה-POST ל: https://api.openai.com/v1/chat/completions
         // ולאחר מכן מחזירים LlmResponse
         return LlmResponse(textReply = "Mocked OpenAI Answer")

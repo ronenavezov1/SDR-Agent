@@ -14,26 +14,19 @@ abstract class BaseLlmClient(
 ) : LlmClient {
 
     override suspend fun sendMessage(
+        agentId: String,
         systemPrompt: String,
         history: List<AgentHistory>,
         availableCapabilities: List<AgentCapability>
     ): LlmResponse {
 
-        println("🌐 [$providerName] Preparing request for model: $modelName...")
-
         return try {
-            // 1. קריאה לפונקציות האבסטרקטיות שהמודלים הספציפיים מממשים
             val requestPayload = buildRequestPayload(systemPrompt, history, availableCapabilities)
 
-            println("🚀 [$providerName] Executing HTTP network call...")
-
-            // 2. ביצוע קריאת הרשת ומיפוי התשובה
-            executeNetworkCall(requestPayload)
+            executeNetworkCall(agentId, requestPayload)
 
         } catch (e: Exception) {
-            println("❌ [$providerName] Network or Parsing Error: ${e.localizedMessage}")
-
-            // טיפול אחיד בשגיאות עבור כל סוגי המודלים
+            println("❌ [$providerName] [$agentId] Network or Parsing Error: ${e.localizedMessage}")
             LlmResponse(
                 textReply = "System Error from $providerName: ${e.message}",
                 functionCalls = emptyList()
@@ -48,5 +41,5 @@ abstract class BaseLlmClient(
         capabilities: List<AgentCapability>
     ): Any // בדרך כלל יחזיר אובייקט שיעבור סריאליזציה ל-JSON
 
-    protected abstract suspend fun executeNetworkCall(payload: Any): LlmResponse
+    protected abstract suspend fun executeNetworkCall(agentId: String, payload: Any): LlmResponse
 }

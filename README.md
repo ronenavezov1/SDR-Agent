@@ -1,222 +1,354 @@
 # AI SDR Agent — RevAI Engineering Challenge
 
-An AI-powered Sales Development Representative that converts inbound leads into qualified sales opportunities — or intelligently disqualifies them — through email conversation.
+> An AI-powered Sales Development Representative that qualifies or intelligently disqualifies inbound leads through automated email conversations, with human-in-the-loop escalation and configurable business policies.
 
 ---
 
-## Quick Start
+## Table of Contents
+
+1. [Project Overview](#1-project-overview)
+2. [Getting Started](#2-getting-started)
+3. [Architecture & Data Flow](#3-architecture--data-flow)
+4. [State & Reliability](#4-state--reliability)
+5. [Guardrails & Human-in-the-Loop](#5-guardrails--human-in-the-loop)
+6. [Scaling to Thousands of Leads](#6-scaling-to-thousands-of-leads)
+7. [What Would I Improve Next](#7-what-would-i-improve-next)
+
+---
+
+## 1. Project Overview
+
+The business objective is to automate the top of the sales funnel: an inbound lead arrives, the agent sends a personalised outreach email, extracts qualification signals from replies, and progresses the lead toward one of two terminal outcomes — **Qualified** (receives a booking link) or **Disqualified** (receives a polite farewell).
+
+The system enforces a strict qualification model:
+
+| Signal | Rule |
+|---|---|
+| `team_size` | Must be ≥ configured minimum (default: 10) |
+| `use_case` | Must be explicitly and clearly described |
+| `commercial_intent` | Must be confirmed (active evaluation / budget intent) |
+
+All three criteria are **configurable** at startup via `QualificationConfig` — no code changes required to adjust thresholds.
+
+The agent is driven by an **interactive CLI** that simulates a real inbox: submit new leads, process replies, resolve escalations, and inspect the full system event log at any point.
+
+---
+
+## 2. Getting Started
+
+### Prerequisites
+
+- JDK 17+ (JBR 25 recommended)
+- Maven 3.9+
+- A valid **Google Gemini API key** (`gemini-2.5-flash` model)
+
+### Run
 
 ```bash
 export GOOGLE_API_KEY=your_key_here
-./mvnw exec:java   # or use IntelliJ → run MainKt
+
+# Build
+mvn compile
+
+# Run
+mvn exec:java -Dexec.mainClass="org.example.MainKt"
 ```
 
-Then type `demo` to run the built-in 3-scenario walkthrough, or `help` to see all commands.
-
----
-
-## Architecture Overview
+### CLI Commands
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  SdrConsoleView  (CLI: new-lead / reply / resolve / demo)       │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ processNewLead / processReply / resolveEscalation
-┌──────────────────────────▼──────────────────────────────────────┐
-│  SdrOrchestrator                                                │
-│  ├─ LeadStore        (authoritative lead state)                 │
-│  ├─ AuditLog         (append-only event log)                    │
-│  ├─ MockEmailService                                            │
-│  ├─ MockBookingService                                          │
-│  └─ agentsByLead: Map<leadId → AiAgent>                         │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ one AiAgent per lead
-┌──────────────────────────▼──────────────────────────────────────┐
-│  AiAgent  (ReAct loop — from existing infrastructure)           │
-│  ├─ Tools (read-only):   getLeadState, checkQualification       │
-│  └─ Actions (writes):    sendOutreachEmail, sendFollowUpEmail,  │
-│                          updateQualification, createBookingLink, │
-│                          escalateToHuman, disqualifyLead         │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ Gemini 2.5 Flash
-┌──────────────────────────▼──────────────────────────────────────┐
-│  GeminiLlmClient  (swappable via LlmClient interface)           │
-└─────────────────────────────────────────────────────────────────┘
+╔═══════════════════════════════════════════════════════╗
+║   new-lead          Submit a new inbound lead         ║
+║   reply  <email>    Simulate a lead reply             ║
+║   resolve <email>   Provide human escalation response ║
+║   leads             List all leads with status        ║
+║   lead   <email>    Show lead detail                  ║
+║   timeline [email]  Show per-lead event timeline      ║
+║   events            Show global system event log      ║
+║   demo              Run automated 3-scenario demo     ║
+╚═══════════════════════════════════════════════════════╝
 ```
 
-### Component Responsibilities
+### Demo Mode
 
-| Component | Responsibility |
+The fastest way to see the full system in action is the `demo` command. It automatically executes three realistic scenarios end-to-end:
+
+| Scenario | Description |
 |---|---|
-| `SdrOrchestrator` | Lead lifecycle, policy pre-checks, routing to per-lead agents |
-| `AiAgent` (reused) | ReAct reasoning loop; owns per-lead conversation history |
-| `LeadStore` | Single source of truth for lead state (not inside the agent) |
-| `AuditLog` | Append-only, structured event log for observability |
-| Tools/Actions | The only write path into `LeadStore` — policy checked in code |
-| `QualificationConfig` | All qualification rules in one configurable object |
-| Mock services | `MockEmailService`, `MockBookingService` — swap for real integrations |
+| **1 — Happy Path** | A well-qualified lead (50-person team, clear use case, confirmed budget) → Booking link issued |
+| **2 — Pricing Escalation** | Lead asks about discounts → Agent escalates to human, waits for input, then resumes |
+| **3 — Disqualification** | Solo freelancer reveals team size of 1 → Agent politely disqualifies |
+
+```
+sdr> demo
+```
 
 ---
 
-## Key Design Decisions & Tradeoffs
+## 3. Architecture & Data Flow
 
-### 1. Lead state lives outside the agent
+The system enforces a **strict unidirectional (top-down) dependency graph**. No layer ever depends on the layer above it.
 
-**Decision:** The `Lead` object (qualification data, status, email thread) lives in `LeadStore`, not inside the agent's conversation history.
+```
+┌─────────────────────────────────────────────────────┐
+│  SdrConsoleView   (I/O only — stdin/stdout)         │
+└────────────────────────┬────────────────────────────┘
+                         │ delegates all logic
+┌────────────────────────▼────────────────────────────┐
+│  SdrViewModel     (Routing & formatting)            │
+│  Commands ──► SdrOrchestrator                       │
+│  Reads    ──► SdrRepository                         │
+└──────┬──────────────────────────┬───────────────────┘
+       │ commands                 │ reads
+┌──────▼───────────────┐   ┌──────▼───────────────────┐
+│  SdrOrchestrator     │   │  SdrRepository            │
+│  (Stateless service) │──►│  (Single source of truth) │
+└──────┬───────────────┘   └──────────────────────────┘
+       │ processInput()
+┌──────▼───────────────────────────────────────────────┐
+│  AiAgent × 6  (Short-lived ReAct workers)            │
+│  Actions × 6  (State mutations + policy enforcement) │
+│  Tools   × 2  (Read-only repository queries)         │
+└──────────────────────────────────────────────────────┘
+```
 
-**Why:** Agent histories are conversation artifacts — they can be summarised, truncated, or replayed. Lead state is durable business data. Separating them means:
-- History compression (via `AiAgent.summarizeHistory`) never loses durable lead data.
-- Multiple agents (or a recovered agent after failure) can pick up the same lead seamlessly.
-- State transitions are the only path to mutate lead data — every change is visible in the audit log.
+### Component Breakdown
 
-**Tradeoff:** The agent must read lead state via a tool call (`getLeadState`) rather than "just knowing" it from history. This costs one extra LLM turn but pays for reliability and observability.
+#### SdrConsoleView & SdrViewModel — Presentation Layer
 
-### 2. One agent per lead
+`SdrConsoleView` is deliberately thin: it reads stdin, calls `SdrViewModel`, and prints the returned `String`. Zero business logic lives here.
 
-**Decision:** `SdrOrchestrator` creates a separate `AiAgent` instance for each lead and stores it in `agentsByLead`.
+`SdrViewModel` owns all presentation logic: it routes mutating commands to the `SdrOrchestrator` and queries the `SdrRepository` for display data. The separation means the CLI could be swapped for a REST controller or a web UI by replacing only the View — the rest of the stack is untouched.
 
-**Why:** Each agent's history is the reasoning trail for *that specific lead*. No cross-lead contamination, and the full reasoning chain is preserved for audit/debugging. The orchestrator is the parent that coordinates and inspects agent state.
+#### SdrOrchestrator — Stateless Service
 
-**Tradeoff:** Memory scales linearly with concurrent leads. For thousands of concurrent long-running leads, agent history would need periodic summarisation (already supported via `AiAgent.summarizeHistory`) or externalisation to a database.
+The orchestrator holds **no persistent state of its own**. Every method receives the information it needs from the repository at call time. Its sole responsibility is to coordinate the six specialised agents in the correct sequence.
 
-### 3. Policies enforced in code, not only in prompts
+Each call follows a deterministic pipeline:
 
-**Decision:** Every business policy is a hard check in tool/action code — not just a prompt instruction.
+```
+processNewLead:   outreachWriter
 
-| Policy | Where enforced |
+processReply:     escalationDetector
+                       │ SAFE ──► qualificationExtractor
+                                       │
+                                  infoSufficiency
+                                  ┌────┴─────────────┐
+                          DECIDE_NOW /          NEEDS_MORE_INFO
+                          DISQUALIFY_NOW
+                               │                     │
+                          dealDecision          followUpWriter
+```
+
+#### AiAgent — Short-Lived ReAct Worker
+
+Each `AiAgent` runs a standard **ReAct (Reason + Act) loop**: it sends the conversation history to the LLM, executes any requested tool calls concurrently, appends results to history, and repeats until the LLM emits a final text response.
+
+**Critical design choice:** the agent **clears its own memory immediately after returning a result**. This is an intentional constraint: since all durable state lives in `SdrRepository`, an agent that retains cross-turn history would be carrying stale or conflicting context. Clearing after each call prevents context pollution and eliminates a class of LLM hallucination (e.g., "I already sent this email" when the new call is for a different lead). Each invocation is fully self-contained.
+
+The six specialised agents and their responsibilities:
+
+| Agent | Tools | Actions | Purpose |
+|---|---|---|---|
+| `outreachWriter` | `getLeadState` | `sendOutreachEmail` | Compose and send the first personalised email |
+| `followUpWriter` | `getLeadState` | `sendFollowUpEmail` | Send a targeted follow-up for the single most important missing field |
+| `escalationDetector` | `getLeadState` | `escalateToHuman` | Scan incoming messages for pricing / sensitive triggers → `SAFE` or `ESCALATED` |
+| `qualificationExtractor` | `getLeadState` | `updateQualification` | Extract `useCase`, `teamSize`, `commercialIntent` — only if clearly and explicitly stated |
+| `infoSufficiency` | `getLeadState`, `checkQualification` | _(none)_ | Assess whether data is sufficient vs. remaining follow-up budget → `DECIDE_NOW / NEEDS_MORE_INFO / DISQUALIFY_NOW` |
+| `dealDecision` | `getLeadState`, `checkQualification` | `createBookingLink`, `disqualifyLead` | Make and execute the final qualified / disqualified outcome |
+
+Each agent receives only the tools and actions relevant to its role. An `outreachWriter` cannot accidentally disqualify a lead; a `dealDecision` agent cannot send follow-up emails. This **principle of least privilege** at the agent level is a meaningful guardrail.
+
+#### Actions & Tools — Execution Layer
+
+**Tools** (`Tool` interface) are **read-only**: they query the repository and return a string for the LLM to reason about. They never mutate state.
+
+**Actions** (`Action` interface) are **write-only**: they mutate the repository and log a domain event. Policies are enforced *inside* the action code before any mutation occurs — the LLM cannot bypass a policy by wording a prompt differently.
+
+| Capability | Type | Policies enforced |
+|---|---|---|
+| `sendOutreachEmail` | Action | `NO_DUPLICATE_OUTREACH` |
+| `sendFollowUpEmail` | Action | `MAX_FOLLOW_UPS`, `NO_EMAIL_ESCALATED` |
+| `createBookingLink` | Action | `BOOKING_REQUIRES_QUALIFICATION` |
+| `escalateToHuman` | Action | Idempotent (cannot double-escalate) |
+| `disqualifyLead` | Action | Idempotent (cannot re-disqualify) |
+| `updateQualification` | Action | _(none — pure data write)_ |
+| `getLeadState` | Tool | _(read-only)_ |
+| `checkQualification` | Tool | _(read-only)_ |
+
+#### SdrRepository — Single Source of Truth
+
+The repository depends on **nothing** — only plain data classes. It holds:
+
+- `_leads: Map<String, Lead>` — the current state of every lead, keyed by email
+- `_systemEvents: List<Event>` — an immutable, append-only global event log
+
+Every domain event carries a `leadEmail` field, so the global log can be filtered per-lead or inspected as a full system timeline. This design mirrors **event sourcing**: state can always be reconstructed by replaying events.
+
+---
+
+## 4. State & Reliability
+
+### What state is kept and why
+
+| Stored on `Lead` | Purpose |
 |---|---|
-| No duplicate outreach | `SendOutreachEmailAction` checks `lead.outreachSent` |
-| Max follow-ups | `SendFollowUpEmailAction` checks `lead.followUpCount >= config.maxFollowUps` |
-| Booking requires qualification | `CreateBookingLinkAction` re-validates all criteria |
-| No email while escalated | `SendFollowUpEmailAction` checks `lead.status == ESCALATED_HUMAN` |
+| `status: LeadStatus` | Current lifecycle position (sealed interface: `New`, `AwaitingClientResponse`, `Escalated`, `Qualified`, `Disqualified`) |
+| `useCase`, `teamSize`, `commercialIntent` | Incrementally populated qualification fields |
+| `emailThread` | Full email history (OUTBOUND / INBOUND), used as conversation context |
+| `followUpCount`, `outreachSent`, `bookingLink` | Policy enforcement counters and outcome markers |
+| `events: List<Event>` | Per-lead audit trail — every action taken is recorded |
 
-Prompt instructions tell the model *when* to use each tool. Code enforces that even if the model calls the wrong tool at the wrong time, the policy holds. Defense in depth.
+**What is deliberately not stored:** agent conversation history. Once an `AiAgent` returns a result it clears its `_history`. The LLM's "memory" of a lead is reconstructed on each call from `lead.toContextString()` and `lead.events` — structured, deterministic data rather than fragile free-text conversation logs.
 
-**Tradeoff:** Slightly more code to maintain — but this is non-negotiable for a system that moves real leads to qualified/disqualified states.
+### Avoiding unsafe mutations
 
-### 4. Human-in-the-loop as a blocking state transition
-
-**Decision:** Pricing escalation is modelled as a `LeadStatus.ESCALATED_HUMAN` state. The orchestrator refuses to route any input to the agent while a lead is in this state.
-
-**Why:** This guarantees the agent cannot "drift" around the escalation. The pricing keywords are detected both in the orchestrator (before the model sees them) and in the system prompt (so the model understands *why* it must escalate). `EscalateToHumanAction` also sets the status — making the guard a tri-layer defence.
-
-### 5. CQRS split for tools
-
-**Decision:** Read-only capabilities are `Tool` (execute); state-mutating ones are `Action` (perform). The `AgentConfig` holds them in separate maps.
-
-**Why:** This makes the distinction explicit in the type system. Read-only tools can safely be called in parallel, cached, or retried; actions must be idempotent by design and never called twice for the same effect (e.g. `sendOutreachEmail` is guarded by `outreachSent`).
-
-### 6. Qualification rules in a single config object
-
-**Decision:** All thresholds (`minTeamSize`, `maxFollowUps`, `requireUseCase`, `pricingKeywords`) live in `QualificationConfig`, injected into the orchestrator.
-
-**Why:** Business rules change. A new customer segment might have a different minimum team size. Moving thresholds into a data object means the system prompt and tool checks both read from the same source — no drift between what the model is told and what the code enforces.
-
----
-
-## Observability
-
-Every meaningful event is logged to `AuditLog`:
+The LLM **cannot directly mutate any state**. The only path to state change is:
 
 ```
-🆕 [AUDIT 11:15:01] [lead:demo-001] LEAD_RECEIVED  {name=Sarah Chen, company=TechCorp}
-📧 [AUDIT 11:15:04] [lead:demo-001] EMAIL_SENT      {type=OUTREACH, to=sarah@techcorp.com}
-📨 [AUDIT 11:15:10] [lead:demo-001] REPLY_RECEIVED  {preview=Thanks for reaching out...}
-🔍 [AUDIT 11:15:12] [lead:demo-001] QUALIFICATION_UPDATED  {teamSize=50, useCase=sprint planning}
-✅ [AUDIT 11:15:13] [lead:demo-001] LEAD_QUALIFIED  {name=Sarah Chen, link=https://booking...}
+LLM requests function call
+  → AiAgent.executeCapabilitySafely()
+    → Action.perform()
+      → Policy checks (may reject)
+        → Lead field update
+          → repository.logEvent(Event.*)
 ```
 
-Use `timeline <leadId>` in the CLI for a per-lead view, or `timeline` for all leads.
+This means every mutation is:
+1. **Intentional** — the LLM must explicitly request a named action
+2. **Validated** — policies run in Kotlin code before the mutation
+3. **Audited** — a typed domain event is appended to both the lead's log and the global event log
 
-The `AiAgent.history` provides the full reasoning trace (LLM reasoning, tool calls, tool results) per lead, readable at any time.
+There is no "catch-all" mutation surface. The LLM cannot call `lead.status = X` or skip the event log.
 
----
+### LeadStatus as a sealed interface
 
-## Human-in-the-Loop Flow
-
-```
-Lead reply contains "pricing" / "discount"
-  │
-  ▼
-SdrOrchestrator detects pricing keywords (pre-check)
-  → adds ⚠️ warning to agent input
-  │
-  ▼
-AiAgent system prompt: MUST call escalateToHuman
-  │
-  ▼
-EscalateToHumanAction sets status = ESCALATED_HUMAN
-  → prints escalation banner to console
-  → blocks all further agent processing for this lead
-  │
-  ▼
-Human types: resolve <leadId>
-  → SdrOrchestrator sets status = QUALIFYING
-  → calls agent.processInput("Human responded: ...")
-  │
-  ▼
-Agent continues qualification with human guidance
-```
-
----
-
-## Qualification Logic
-
-Configurable via `QualificationConfig`:
+`LeadStatus` is a **sealed interface** rather than an enum. `Escalated` is a `data class` carrying the full `HumanEscalation` payload (reason, trigger message, human response). This co-locates the state and its data, preventing a nullable `escalation: HumanEscalation?` field from drifting out of sync with the status field.
 
 ```kotlin
-QualificationConfig(
-    minTeamSize            = 10,     // team_size must be ≥ this
-    requireUseCase         = true,   // use_case must be described
-    requireCommercialIntent = true,  // must be actively buying/evaluating
-    maxFollowUps           = 3,      // max emails before giving up
-    pricingKeywords        = listOf("price", "pricing", "cost", "discount", ...)
-)
+sealed interface LeadStatus {
+    data object New                    : LeadStatus
+    data object AwaitingClientResponse : LeadStatus
+    data object Qualified              : LeadStatus
+    data object Disqualified           : LeadStatus
+    data class  Escalated(val escalation: HumanEscalation) : LeadStatus
+}
 ```
 
-`CheckQualificationTool` evaluates all three and returns:
-- `QUALIFIED` → agent calls `createBookingLink`
-- `NEEDS_MORE_INFO` → agent calls `sendFollowUpEmail`
-- `DISQUALIFIED` → agent calls `disqualifyLead`
+---
+
+## 5. Guardrails & Human-in-the-Loop
+
+### Human-in-the-Loop: Pricing Escalation
+
+When a lead's reply contains any configured pricing keyword (`price`, `discount`, `cost`, `budget`, etc.), two independent layers enforce escalation:
+
+1. **Prompt layer:** The system prompt instructs every reply-processing agent to call `escalateToHuman` immediately upon detecting a pricing mention.
+2. **Code layer:** The orchestrator scans `replyText` for `pricingKeywords` before calling any agent. If a match is found, the `⚠️ PRICING KEYWORDS DETECTED` warning is injected directly into the agent's prompt, eliminating any ambiguity.
+3. **Action layer:** `EscalateToHumanAction` sets `lead.status = LeadStatus.Escalated(...)`. All subsequent actions that try to email or qualify the lead check for this status and reject the request with a `POLICY_BLOCKED` event.
+
+The agent **cannot resume** processing the lead until a human provides a response via `resolve <email>`, at which point the orchestrator resumes the qualification pipeline using the human's guidance as context.
+
+### Policy Guardrails (Enforced in Kotlin, Not in Prompts)
+
+| Policy | Enforcement point | Behaviour |
+|---|---|---|
+| `NO_DUPLICATE_OUTREACH` | `SendOutreachEmailAction` | Rejects if `lead.outreachSent == true` |
+| `MAX_FOLLOW_UPS` | `SendFollowUpEmailAction` | Rejects if `followUpCount >= config.maxFollowUps` |
+| `NO_EMAIL_ESCALATED` | `SendFollowUpEmailAction` | Rejects while `status is LeadStatus.Escalated` |
+| `BOOKING_REQUIRES_QUALIFICATION` | `CreateBookingLinkAction` | Rejects if any qualification criterion is unmet |
+
+All policy violations are recorded as `Event.PolicyBlocked(leadEmail, policyName, reason)` events — they are visible in the event log and do not silently fail.
 
 ---
 
-## What I Would Improve Next
+## 6. Scaling to Thousands of Leads
 
-1. **Persistent storage** — swap `LeadStore` for a database (Postgres/SQLite). The interface is already isolated; it's a one-file change.
+> *"If this had to support thousands of long-running leads in production, what would you change?"*
 
-2. **Agent history persistence** — serialise `AgentHistory` to the DB so agents survive process restarts and can resume long-running leads.
+The architecture was designed with this question in mind. Because `SdrOrchestrator` is **already completely stateless** and `SdrRepository` is the only stateful component, horizontal scaling is primarily an infrastructure problem, not an application redesign.
 
-3. **Retry / idempotency** — add idempotency keys to email sends so a crash-and-replay scenario never sends the same email twice.
+**1. Persistent Repository**
 
-4. **Richer qualification extraction** — add a dedicated structured extraction step (JSON-schema tool call) instead of relying on the LLM to call `updateQualification` with correct field types.
+Replace the in-memory `Map<String, Lead>` with a persistent database. The event log (`_systemEvents`) maps naturally to an **append-only events table** in PostgreSQL, with the current lead state either derived by replaying events or maintained as a materialised view. The `SdrRepository` interface requires no changes — only its implementation.
 
-5. **Evaluation harness** — record real LLM decisions against labelled test leads to detect prompt regressions when the model or prompt changes.
+**2. Asynchronous Processing via Message Queue**
 
-6. **Async email inbox polling** — replace the CLI `reply` command with a real inbox webhook / polling loop, completing the feedback cycle without human simulation.
+The current model is synchronous: the CLI blocks while the LLM runs. At scale, incoming emails (webhook callbacks from a real email provider) would be pushed onto a **message queue (Kafka / RabbitMQ)**. Each message contains `{ leadEmail, replyText }`. A pool of stateless worker processes consumes the queue, each loading the lead from the DB, running the orchestrator pipeline, and writing the result back — without any shared in-process state.
 
----
+**3. LLM Call Concurrency**
 
-## Open Design Question
+Leads are independent. With a message queue, thousands of leads can be processed concurrently by multiple worker instances. Since each `SdrOrchestrator` invocation is a pure function over `(Lead, replyText)` → `String`, no cross-lead locking is required.
 
-### How do architectural choices help the agent reliably reach the business objective over time?
+**4. Observability at Scale**
 
-The core reliability challenge for a long-running business agent is **drift** — the gap that grows between what the system *intends* to do and what it *actually* does as state accumulates, failures occur, and the model reasons imperfectly.
-
-This system addresses drift at four levels:
-
-**1. Externalised, authoritative state.** Lead qualification data lives in `LeadStore`, not inside the agent's chat history. This means agent reasoning errors (hallucinating a team size, forgetting a prior reply) cannot corrupt durable business data — they can only affect the *next* tool call. If the model calls `updateQualification` with wrong data, the wrong data is stored and visible in the audit log, recoverable by a human. The agent's history can be compressed, replayed, or cleared without affecting the lead's qualification record.
-
-**2. Policy enforcement in code, not in prompts.** Prompts set intent; code enforces invariants. A prompt that says "never send more than 3 follow-ups" will eventually be violated — by model drift, context truncation, or a jailbreak. A tool that checks `followUpCount >= maxFollowUps` and returns `POLICY_BLOCKED` will not. Every business-critical boundary (qualification gates, escalation gates, deduplication) is enforced in tool code, making policy violation structurally impossible rather than merely unlikely.
-
-**3. Human escalation as a state machine gate.** Pricing discussions are not "handled carefully" — they are *blocked* until a human resolves them. The orchestrator refuses to route agent input for ESCALATED_HUMAN leads, and mutating actions refuse to execute on escalated leads. The human's approval is a first-class state transition, not an afterthought. This maps directly to the business objective: a missed pricing escalation could commit the company to a discount it never approved.
-
-**4. Append-only audit log as the ground truth.** The audit log is never modified, only appended to. Every state change is logged with a timestamp and details before it takes effect. This means that even when the agent makes a wrong decision (e.g. disqualifies a borderline lead), the full decision trail is available for review, correction, and future prompt improvement. Observability is not a debugging tool — it's how the business maintains trust in the agent's outputs over time.
-
-The business objective is not "send emails" — it is to reliably convert good leads and discard bad ones at scale, with human oversight where it matters. Each architectural choice maps to that objective: externalised state enables recovery, policy code prevents violations, escalation gates protect sensitive decisions, and the audit log makes everything visible.
+The per-lead `Event` log and global `_systemEvents` list map directly to a **structured event stream** (e.g., pushed to Datadog, CloudWatch, or an internal analytics store). At scale, this enables dashboards over lead funnel conversion rates, agent latency, and policy violation frequencies — all without adding instrumentation code.
 
 ---
 
-## Scaling Question
+## 7. What Would I Improve Next
 
-To support thousands of long-running leads in production I would move from an in-process, in-memory design to a durable, event-driven one: leads and their qualification state would be persisted in a relational database (PostgreSQL), and the per-lead `AiAgent` instances would be ephemeral workers spun up from that stored state rather than kept alive in a map. Each incoming event (new lead, reply, escalation resolved) would be written to an event queue (Kafka or SQS), consumed by a stateless worker pool that loads the relevant lead from the DB, replays the last N events into a freshly constructed agent, runs one reasoning step, and writes the result back. Agent history would be periodically summarised and stored as a compressed checkpoint so cold-starts stay cheap. The audit log would be a time-series table with indexes on `leadId` and `eventType`, feeding a real-time dashboard. Human escalation queues would be surfaced via a lightweight internal web UI rather than a CLI. The `QualificationConfig` would be loaded from a config service so thresholds can be changed without redeployment, and email throughput would be rate-limited per domain to avoid spam flags.
+| Area | Current state | Next step |
+|---|---|---|
+| **Email integration** | `MockEmailService` prints to stdout | Replace with a real provider (SendGrid / Postmark) via an injectable `EmailService` interface — the actions require no changes |
+| **Entrypoint** | Interactive CLI | Expose a **REST API / Webhook endpoint** so real email providers (Gmail API, Outlook) can POST inbound replies directly; the `SdrViewModel`'s command layer maps cleanly to HTTP handlers |
+| **Structured LLM output** | Agents respond with free text; the orchestrator parses keywords (`ESCALATED`, `DECIDE_NOW`) | Enforce **JSON schema responses** via Gemini's structured output / function-calling API for all routing agents, making the pipeline deterministic and testable without LLM calls |
+| **Persistence** | In-memory `HashMap` | PostgreSQL + JPA / Exposed — the `SdrRepository` interface is already the only database boundary |
+| **Testing** | No automated tests | Unit-test every `Action` and `Tool` with a mock repository; integration-test the orchestrator pipeline with a stubbed `LlmClient` |
+| **Multi-tenancy** | Single qualification config | Parameterise `QualificationConfig` per-tenant, stored in DB — the entire agent pipeline is already config-driven |
+
+---
+
+## Tech Stack
+
+| Component | Technology |
+|---|---|
+| Language | Kotlin 2.3.21 |
+| Build | Maven 3.9 |
+| LLM | Google Gemini 2.5 Flash (`google-genai` SDK 1.60.0) |
+| Concurrency | Kotlin Coroutines (`kotlinx-coroutines-core` 1.10.2) |
+| Architecture | MVVM + Unidirectional Data Flow |
+| Agent pattern | ReAct (Reason + Act) loop |
+
+---
+
+## Project Structure
+
+```
+src/main/kotlin/
+├── Main.kt                        # Dependency wiring (top-down, no cycles)
+├── sdr/
+│   ├── Lead.kt                    # Core domain model
+│   ├── LeadStatus.kt              # Sealed interface (New/Awaiting/Escalated/Qualified/Disqualified)
+│   ├── Event.kt                   # Sealed interface — domain event log (each carries leadEmail)
+│   ├── QualificationConfig.kt     # Configurable qualification rules & policies
+│   └── HumanEscalation.kt         # Escalation payload (embedded in LeadStatus.Escalated)
+├── repositiories/
+│   └── SdrRepository.kt           # Pure data layer — leads + global event log
+├── orchestrator/
+│   └── SdrOrchestrator.kt         # Stateless coordinator of 6 specialised AiAgents
+├── agent/
+│   ├── AiAgent.kt                 # Generic ReAct loop (clears history after each run)
+│   ├── AgentConfig.kt             # Agent configuration & tool/action injection
+│   └── AgentHistory.kt            # Typed conversation history entries
+├── actions/                       # State-mutating capabilities (enforce policies before writing)
+│   ├── SendOutreachEmailAction.kt
+│   ├── SendFollowUpEmailAction.kt
+│   ├── UpdateQualificationAction.kt
+│   ├── CreateBookingLinkAction.kt
+│   ├── EscalateToHumanAction.kt
+│   └── DisqualifyLeadAction.kt
+├── tools/                         # Read-only repository queries
+│   ├── GetLeadStateTool.kt
+│   └── CheckQualificationTool.kt
+├── mock/
+│   ├── MockEmailService.kt        # Simulates email delivery (prints to stdout)
+│   └── MockBookingService.kt      # Generates mock calendar booking URLs
+├── view/
+│   └── SdrConsoleView.kt          # Pure I/O — stdin/stdout only
+├── viewmodel/
+│   └── SdrViewModel.kt            # Routing, formatting, demo scenarios
+└── llm/
+    ├── LlmClient.kt               # Interface (swap Gemini for any provider)
+    └── GeminiLlmClient.kt         # Google Gemini 2.5 Flash implementation
+```
