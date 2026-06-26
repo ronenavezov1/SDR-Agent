@@ -31,25 +31,6 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
         val req = payload as GeminiPayload
         return withContext(Dispatchers.IO) {
             val contents = toContents(req.history)
-
-            println("\n+===== [$agentId] Gemini Request (${contents.size} content items) =====")
-            contents.forEachIndexed { i, c ->
-                val role = c.role().orElse("?")
-                val parts = c.parts().orElse(emptyList()).joinToString(" | ") { p ->
-                    when {
-                        p.text().isPresent ->
-                            "TEXT(\"${p.text().get().take(60).replace('\n', ' ')}\")"
-                        p.functionCall().isPresent ->
-                            "FUNC_CALL(${p.functionCall().get().name().orElse("?")}, args=${p.functionCall().get().args().orElse(emptyMap<String, Any>())})"
-                        p.functionResponse().isPresent ->
-                            "FUNC_RESP(${p.functionResponse().get().name().orElse("?")})"
-                        else -> "UNKNOWN_PART"
-                    }
-                }
-                println("|  [$i] role=$role -> $parts")
-            }
-            println("+==============================================================")
-
             val config = buildConfig(req.system, req.capabilities)
             val response = client.models.generateContent(modelName, contents, config)
 
@@ -62,17 +43,6 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
             }
 
             val textReply = if (funcCalls.isEmpty()) response.text()?.takeIf { it.isNotBlank() } else null
-
-            // LOG: show what Gemini returned
-            println("+--- [$agentId] Gemini Response --------------------------------")
-            if (funcCalls.isNotEmpty()) {
-                funcCalls.forEach { fc ->
-                    println("|  FUNC_CALL -> ${fc.functionName}(${fc.arguments})")
-                }
-            } else {
-                println("|  TEXT -> \"${textReply?.take(120)?.replace('\n', ' ')}\"")
-            }
-            println("+--------------------------------------------------------------\n")
 
             LlmResponse(textReply = textReply, functionCalls = funcCalls)
         }

@@ -47,7 +47,8 @@ sealed interface Event {
     data class BookingLinkCreated(
         override val leadEmail: String,
         override val timestamp: Long = System.currentTimeMillis(),
-        val bookingLink: String
+        val bookingLink: String,
+        val reason: BookingLinkReason
     ) : Event
 
     data class HumanEscalationTriggered(
@@ -82,4 +83,15 @@ sealed interface Event {
         override val timestamp: Long = System.currentTimeMillis(),
         val reason: String
     ) : Event
+}
+
+enum class BookingLinkReason(val display: String) {
+    /** Agent confirmed all three qualification fields and made a qualified decision. */
+    AgentQualified("Agent qualified — all fields confirmed"),
+    /** Lead explicitly asked to speak with a human representative. */
+    ClientRequestedHuman("Lead requested human contact"),
+    /** Human sales rep closed the escalation but qualification data was incomplete. */
+    SalesTeamHandoff("Sales team handoff — incomplete qualification data"),
+    /** All LLM clients failed; no agent decision was possible. */
+    LlmFailed("LLM unavailable — emergency escalation to human queue")
 }

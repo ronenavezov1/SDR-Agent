@@ -1,17 +1,21 @@
 package org.example.debug
 
+import org.example.agent.AgentHistory
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 /**
- * Simple debug tracer controlled by the SDR_DEBUG environment variable.
+ * Debug tracer controlled by the SDR_DEBUG environment variable.
  *
  * Enable:  export SDR_DEBUG=true
- * Disable: unset SDR_DEBUG  (or any value other than "true")
+ * Disable: unset SDR_DEBUG
  *
- * Output goes to stdout so it interleaves with the normal CLI output — making
- * it easy to follow the exact data flow: prompt → LLM → tool calls → result.
+ * Each agent call produces exactly two log blocks:
+ *   1. AGENT START — the full input prompt
+ *   2. AGENT DONE  — the full conversation history + final output
+ *
+ * No intermediate ping-pong (LLM request/response, tool calls, react loops) is printed.
  */
 object DebugLogger {
 
@@ -22,75 +26,82 @@ object DebugLogger {
 
     private fun ts() = fmt.format(Instant.now())
 
-    // ── Section separators ────────────────────────────────────────────────────
+    private fun bar(char: Char = '═', width: Int = 80) = char.toString().repeat(width)
 
-    fun agentStart(agentId: String, workOnId: String, input: String) {
+    // ── Agent lifecycle ───────────────────────────────────────────────────────
+
+    fun agentStart(agentId: String, workOnId: String, llmName: String, input: String) {
         if (!enabled) return
         println()
-        println("$CYAN╔══ 🤖 AGENT START [$agentId]  lead=$workOnId  ${ts()} ══$RESET")
-        println("$CYAN║  INPUT PROMPT:$RESET")
-        input.lines().forEach { println("$CYAN║    $RESET$it") }
-        println("$CYAN╚${"═".repeat(60)}$RESET")
+        println("$CYAN${bar()}$RESET")
+        println("$CYAN  🤖  AGENT START   agent=$agentId   lead=$workOnId   llm=$llmName   ${ts()}$RESET")
+        println("$CYAN${bar('─')}$RESET")
+        println("$CYAN  INPUT:$RESET")
+        input.lines().forEach { println("$CYAN  │  $RESET$it") }
+        println("$CYAN${bar()}$RESET")
     }
 
-    fun agentDone(agentId: String, workOnId: String, output: String) {
+    fun agentDone(
+        agentId: String,
+        workOnId: String,
+        llmName: String,
+        history: List<AgentHistory>,
+        output: String
+    ) {
         if (!enabled) return
-        println("$GREEN╔══ ✅ AGENT DONE  [$agentId]  lead=$workOnId  ${ts()} ══$RESET")
-        println("$GREEN║  OUTPUT:$RESET")
-        output.lines().take(30).forEach { println("$GREEN║    $RESET$it") }
-        if (output.lines().size > 30) println("$GREEN║    … (${output.lines().size - 30} more lines)$RESET")
-        println("$GREEN╚${"═".repeat(60)}$RESET")
         println()
-    }
-
-    // ── LLM interaction ───────────────────────────────────────────────────────
-
-    fun llmRequest(agentId: String, workOnId: String, historySize: Int, capabilityNames: List<String>) {
-        if (!enabled) return
-        println("$YELLOW  ┌─ 🧠 LLM REQUEST  [$agentId]  lead=$workOnId  history=$historySize  tools=${capabilityNames}$RESET")
-    }
-
-    fun llmResponse(agentId: String, workOnId: String, textPreview: String?, functionCalls: List<String>) {
-        if (!enabled) return
-        if (functionCalls.isNotEmpty()) {
-            println("$YELLOW  │  ◀ LLM → [$agentId] lead=$workOnId  function_calls=$functionCalls$RESET")
-        } else {
-            val preview = textPreview?.take(120)?.replace("\n", " ") ?: "(null)"
-            println("$YELLOW  └─ ◀ LLM → [$agentId] lead=$workOnId  text=\"$preview\"$RESET")
+        println("$GREEN${bar()}$RESET")
+        println("$GREEN  ✅  AGENT DONE    agent=$agentId   lead=$workOnId   llm=$llmName   ${ts()}$RESET")
+        println("$GREEN${bar('─')}$RESET")
+        println("$GREEN  HISTORY (${history.size} turns):$RESET")
+        history.forEachIndexed { i, item ->
+            val (label, text) = when (item) {
+                is AgentHistory.UserInput          -> "USER  " to item.text
+                is AgentHistory.AiResponse         -> "AI    " to item.text
+                is AgentHistory.ToolCallRequest    -> "CALL  " to "${item.toolName}  args=${item.arguments}"
+                is AgentHistory.ToolExecutionResult -> {
+                    val icon = if (item.isSuccess) "RESULT" else "ERROR "
+                    icon to "[${item.toolName}] ${item.resultData}"
+                }
+                is AgentHistory.SystemEvent        -> "SYS   " to item.eventDescription
+                is AgentHistory.Summary            -> "SUMMARY" to item.text
+            }
+            println("$GREEN  │  [${"${i + 1}".padStart(2)}] $label  $RESET${text.replace("\n", "\n$GREEN  │          $RESET")}")
         }
-    }
-
-    // ── Tool / Action execution ───────────────────────────────────────────────
-
-    fun toolCall(agentId: String, toolName: String, args: Map<String, Any>) {
-        if (!enabled) return
-        println("$BLUE  │  🔧 CALL  $toolName  args=$args$RESET")
-    }
-
-    fun toolResult(agentId: String, toolName: String, result: String, isSuccess: Boolean) {
-        if (!enabled) return
-        val icon = if (isSuccess) "✅" else "❌"
-        val preview = result.take(200).replace("\n", " ")
-        println("$BLUE  │  $icon RESULT [$toolName]: $preview$RESET")
-    }
-
-    // ── ReAct loop depth ──────────────────────────────────────────────────────
-
-    fun reactLoop(agentId: String, depth: Int) {
-        if (!enabled) return
-        println("$DIM  │  ↻ ReAct depth=$depth$RESET")
+        println("$GREEN${bar('─')}$RESET")
+        println("$GREEN  OUTPUT:$RESET")
+        output.lines().forEach { println("$GREEN  │  $RESET$it") }
+        println("$GREEN${bar()}$RESET")
+        println()
     }
 
     // ── History compression ───────────────────────────────────────────────────
 
     fun historySummarize(agentId: String, historySize: Int) {
         if (!enabled) return
-        println("$DIM  │  🗜️  SUMMARIZE  [$agentId]  history=$historySize → compressing…$RESET")
+        println("$DIM  🗜️  [$agentId]  Compressing history ($historySize turns)…$RESET")
     }
 
     fun historySummarizeError(agentId: String, e: Exception) {
         if (!enabled) return
-        println("$RED  │  ❌ SUMMARIZE FAILED  [$agentId]  ${e::class.simpleName}: ${e.message?.take(120)}$RESET")
+        println("$RED  ❌  [$agentId]  History compression failed: ${e::class.simpleName}: ${e.message?.take(120)}$RESET")
+    }
+
+    // ── LLM network layer ─────────────────────────────────────────────────────
+
+    fun llmRetry(providerName: String, errorMsg: String, delayMs: Long, attempt: Int, maxRetries: Int) {
+        if (!enabled) return
+        println("$YELLOW  ⚠️  [$providerName]  Transient error — retrying in ${delayMs}ms (attempt $attempt/$maxRetries): ${errorMsg.take(80)}$RESET")
+    }
+
+    fun llmClientFailure(clientName: String, errorMsg: String?) {
+        if (!enabled) return
+        println("$YELLOW  ⚠️  [tryWithAllClients]  $clientName failed: ${errorMsg?.take(120)}$RESET")
+    }
+
+    /** Always visible — non-LLM exceptions indicate code bugs, not LLM failures. */
+    fun orchestrationBug(leadEmail: String, e: Exception) {
+        println("$RED🔴 [tryWithAllClients] Unexpected exception (${e::class.simpleName}) for $leadEmail: ${e.message}$RESET")
     }
 
     // ── ANSI colour codes ─────────────────────────────────────────────────────
@@ -99,7 +110,6 @@ object DebugLogger {
     private const val CYAN   = "\u001B[36m"
     private const val GREEN  = "\u001B[32m"
     private const val YELLOW = "\u001B[33m"
-    private const val BLUE   = "\u001B[34m"
     private const val RED    = "\u001B[31m"
     private const val DIM    = "\u001B[2m"
 }

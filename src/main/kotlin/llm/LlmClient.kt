@@ -5,6 +5,8 @@ import org.example.agent.AgentCapability
 import kotlin.jvm.Throws
 
 interface LlmClient {
+    val providerName: String
+
     @Throws(LlmSendException::class)
     suspend fun sendMessage(
         agentId: String,

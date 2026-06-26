@@ -2,17 +2,18 @@ package org.example.llm
 
 import org.example.agent.AgentHistory
 import org.example.agent.AgentCapability
+import org.example.debug.DebugLogger
 
 import kotlinx.coroutines.delay
 import java.io.IOException
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
- * מחלקת בסיס שמנהלת את כל המעטפת של הקריאה ל-LLM.
- * חוסכת את כל הכפילויות בין המודלים השונים וכוללת מנגנון הגנה מפני Rate Limits.
+ * Base LLM client — handles retry logic and the empty-response guard.
+ * Concrete subclasses only need to implement [buildRequestPayload] and [executeNetworkCall].
  */
 abstract class BaseLlmClient(
-    private val providerName: String,
+    final override val providerName: String,
     protected val apiKey: String,
     protected val modelName: String
 ) : LlmClient {
@@ -56,11 +57,17 @@ abstract class BaseLlmClient(
             } catch (e: Exception) {
                 val msg = e.message ?: ""
 
-                // Permanent errors — fail immediately, no retry
+                // Permanent errors — fail immediately, no retry, but still wrap as LlmSendException
+                // so tryWithAllClients routes it correctly (not to orchestrationBug).
                 val isPermanent = msg.contains("400") || msg.contains("401") ||
                                   msg.contains("403") || msg.contains("Unauthorized") ||
                                   msg.contains("Bad Request")
-                if (isPermanent) throw e
+                if (isPermanent) throw LlmSendException(
+                    agentId = agentId,
+                    providerName = providerName,
+                    modelName = modelName,
+                    errorMessage = e.message ?: "Permanent error from $providerName"
+                )
 
                 // Transient errors — retry with backoff
                 val isTransient = msg.contains("429") || msg.contains("Too Many Requests") ||
@@ -68,7 +75,7 @@ abstract class BaseLlmClient(
                                   e is IOException
 
                 if (isTransient && attempt < maxRetries - 1) {
-                    println("⚠️ Transient error from $providerName (${msg.take(60)}). Retrying in ${currentDelay}ms (attempt ${attempt + 1}/$maxRetries)…")
+                    DebugLogger.llmRetry(providerName, msg, currentDelay, attempt + 1, maxRetries)
                     delay(currentDelay.milliseconds)
                     currentDelay *= 2
                 } else {
@@ -89,12 +96,12 @@ abstract class BaseLlmClient(
         )
     }
 
-    /** פונקציות שכל מודל חייב לממש לפי חוקי ה-API שלו */
+    /** Each concrete client maps the shared history/capabilities into its own wire format. */
     protected abstract fun buildRequestPayload(
         system: String,
         history: List<AgentHistory>,
         capabilities: List<AgentCapability>
-    ): Any // בדרך כלל יחזיר אובייקט שיעבור סריאליזציה ל-JSON
+    ): Any
 
     @Throws(LlmSendException::class)
     protected abstract suspend fun executeNetworkCall(agentId: String, payload: Any): LlmResponse

@@ -22,7 +22,7 @@ class DisqualifyLeadAction(private val ctx: OrchestratorContext) : Action {
         if (lead.status is LeadStatus.Disqualified)
             return "Lead '${lead.name}' is already disqualified."
 
-        lead.status = LeadStatus.Disqualified
+        lead.status = LeadStatus.Disqualified(reason)
         ctx.saveLead(lead)
         ctx.logEvent(Event.LeadDisqualified(leadEmail = ctx.leadEmail, reason = reason))
 

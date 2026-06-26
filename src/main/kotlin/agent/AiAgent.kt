@@ -1,8 +1,5 @@
 package org.example.agent
 
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.async
 import kotlinx.coroutines.withTimeout
 import org.example.debug.DebugLogger
 import org.example.llm.FunctionCall
@@ -62,21 +59,17 @@ class AiAgent(private val config: AgentConfig) {
     // ── Public API ────────────────────────────────────────────────────────────
 
     /**
-     * Processes a user message through the full ReAct loop and notifies
-     * the caller via [onComplete] when a final answer is ready.
+     * Processes a user message through the full ReAct loop and returns the agent's final answer.
      *
-     * If the agent is currently busy ([AgentStatus] is not [AgentStatus.Idle]),
-     * the call is rejected immediately: [onComplete] is invoked with a message
-     * that describes the current status and includes a formatted snapshot of the
-     * recent history window — so the caller knows exactly what the agent is doing
-     * and why it cannot accept new input right now.
+     * If the agent is currently busy ([AgentStatus] is not [AgentStatus.Idle]), the call is
+     * rejected immediately and returns a message describing the current status with a snapshot
+     * of the recent history window.
      *
-     * The entire loop is guarded by [AgentConfig.timeoutMs]. If the LLM (or any
-     * tool) takes too long the coroutine is cancelled, the agent status is reset
-     * to [AgentStatus.Idle], and [onComplete] is called with an error message.
+     * The loop is guarded by [AgentConfig.timeoutMs]. If the LLM or any tool takes too long the
+     * coroutine is cancelled and an error string is returned.
+     * Non-LLM exceptions propagate up to the caller (e.g. [SdrRepository.tryWithAllClients]).
      *
-     * @param input      The user's message as a plain string.
-     * @param onComplete Suspend callback invoked with the agent's final reply.
+     * @param input The user's message as a plain string.
      */
     suspend fun processInput(input: String) : String{
         if (_status is AgentStatus.Error) {
@@ -107,14 +100,14 @@ class AiAgent(private val config: AgentConfig) {
             return "🚫 Agent '${config.agentId}' is busy ($statusDesc) and cannot accept new input.\n$historyDump"
         }
 
-        DebugLogger.agentStart(config.agentId, config.workOnId, input)
+        DebugLogger.agentStart(config.agentId, config.workOnId, config.llmClient.providerName, input)
 
         _history.add(AgentHistory.UserInput(text = input))
         try {
             val result = withTimeout(config.timeoutMs.milliseconds) {
                 runReactLoop(depth = 0)
             }
-            DebugLogger.agentDone(config.agentId, config.workOnId, result)
+            DebugLogger.agentDone(config.agentId, config.workOnId, config.llmClient.providerName, _history.toList(), result)
             return result
         } finally {
             _history.clear()
@@ -142,11 +135,11 @@ class AiAgent(private val config: AgentConfig) {
      * 4. On success: clears [_history] and inserts exactly one [AgentHistory.Summary].
      *
      * @param maxItems   How many recent history items to include in the summary request.
-     *                   Older items are dropped before summarising to stay within the
-     *                   LLM's context window. Defaults to 30.
+     *                   Older items are dropped to stay within the LLM's context window.
+     *                   Defaults to 30.
      * @param timeoutMs  Maximum time in milliseconds allowed for the LLM call.
-     *                   Defaults to 30 000 ms (30 seconds).
-     * @return           The summary text, or null if the operation timed out or failed.
+     *                   Defaults to 30 000 ms (30 seconds). On timeout the history is
+     *                   left untouched (fail-safe).
      */
     private suspend fun summarizeHistory(
         maxItems:  Int  = 30,
@@ -208,14 +201,11 @@ class AiAgent(private val config: AgentConfig) {
      *
      * Each iteration:
      *  1. Sends the current history to the LLM.
-     *  2a. If the LLM requests tool calls → executes all tools **concurrently**
-     *      (parallel, not serial), appends results to history, recurses (depth + 1).
+     *  2a. If the LLM requests tool calls → executes each tool sequentially,
+     *      appends results to history, recurses (depth + 1).
      *  2b. If the LLM returns text → appends to history, returns the text.
      *
-     * Concurrent tool execution uses [async]/[await], so a request that triggers
-     * two independent tools is handled in parallel — saving wall-clock time.
-     *
-     * @param depth Recursion counter. Hard-stops at depth > 5 to prevent infinite loops.
+     * @param depth Recursion counter. Hard-stops at [AgentConfig.maxDepth] to prevent infinite loops.
      * @return The agent's final plain-text reply to the user.
      */
     @Throws(LlmSendException::class)
@@ -232,30 +222,15 @@ class AiAgent(private val config: AgentConfig) {
             summarizeHistory(maxItems = config.maxHistorySize)
         }
 
-        DebugLogger.reactLoop(config.agentId, depth)
         _status = AgentStatus.Thinking
 
         val capabilities = (config.tools.values + config.actions.values).toList()
-
-        DebugLogger.llmRequest(
-            agentId         = config.agentId,
-            workOnId        = config.workOnId,
-            historySize     = _history.size,
-            capabilityNames = capabilities.map { it.name }
-        )
 
         val response = config.llmClient.sendMessage(
             agentId               = config.agentId,
             systemPrompt          = config.systemPrompt,
             history               = _history.takeLast(config.maxHistorySize),
             availableCapabilities = capabilities
-        )
-
-        DebugLogger.llmResponse(
-            agentId       = config.agentId,
-            workOnId      = config.workOnId,
-            textPreview   = response.textReply,
-            functionCalls = response.functionCalls.map { it.functionName }
         )
 
         if (response.functionCalls.isNotEmpty()) {
@@ -282,15 +257,12 @@ class AiAgent(private val config: AgentConfig) {
         val tool   = config.tools[call.functionName]
         val action = config.actions[call.functionName]
 
-        DebugLogger.toolCall(config.agentId, call.functionName, call.arguments)
-
         return try {
             val resultText = when {
                 tool   != null -> tool.execute(call.arguments)
                 action != null -> action.perform(config.agentId, call.arguments)
                 else           -> "Error: capability '${call.functionName}' is not registered."
             }
-            DebugLogger.toolResult(config.agentId, call.functionName, resultText, isSuccess = true)
             AgentHistory.ToolExecutionResult(
                 toolName   = call.functionName,
                 resultData = resultText,
@@ -298,7 +270,6 @@ class AiAgent(private val config: AgentConfig) {
             )
         } catch (e: Exception) {
             val errMsg = "Execution error in '${call.functionName}': ${e.message}"
-            DebugLogger.toolResult(config.agentId, call.functionName, errMsg, isSuccess = false)
             AgentHistory.ToolExecutionResult(
                 toolName   = call.functionName,
                 resultData = errMsg,

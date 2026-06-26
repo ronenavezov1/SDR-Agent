@@ -43,7 +43,7 @@ class CreateBookingLinkAction(private val ctx: OrchestratorContext) : Action {
         lead.status = LeadStatus.Qualified
         ctx.saveLead(lead)
 
-        ctx.logEvent(Event.BookingLinkCreated(leadEmail = ctx.leadEmail, bookingLink = link))
+        ctx.logEvent(Event.BookingLinkCreated(leadEmail = ctx.leadEmail, bookingLink = link, reason = BookingLinkReason.AgentQualified))
         ctx.logEvent(Event.LeadQualified(
             leadEmail = ctx.leadEmail,
             useCase = lead.useCase,

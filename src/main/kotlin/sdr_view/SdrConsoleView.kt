@@ -1,67 +1,89 @@
 package org.example.sdr_view
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.example.sdr_viewmodel.SdrViewModel
 
 /**
  * SdrConsoleView — pure I/O layer.
  *
- * Reads stdin, delegates every command to [SdrViewModel], prints the result.
- * No business logic, no state, no domain knowledge lives here.
+ * Dual-Thread design (MVI-compliant):
+ *  - Thread 1 (input loop): reads stdin, dispatches intents to [SdrViewModel]. Long-running
+ *    commands (new-lead, reply, resolve) are fire-and-forget — control returns to the prompt
+ *    immediately so the user can issue the next command while the agent works.
+ *  - Thread 2 (result printer): collects [SdrViewModel.resultsFlow] and renders each completed
+ *    agent result with a visual separator, then reprints the `sdr>` prompt.
+ *
+ * The View never mutates state. All rendering is driven by data from the ViewModel.
+ * State mutations happen exclusively in SdrRepository via deterministic Actions.
  */
 class SdrConsoleView(private val viewModel: SdrViewModel) {
 
     suspend fun start() {
         printWelcome()
-        var running = true
-        while (running) {
-            print("\nsdr> ")
-            System.out.flush()
-            val line  = withContext(Dispatchers.IO) { readlnOrNull() }?.trim() ?: break
-            val parts = line.split(" ", limit = 2)
-            val cmd   = parts[0].lowercase()
-            val arg   = parts.getOrNull(1)?.trim()
-
-            running = when (cmd) {
-                "new-lead"     -> { handleNewLead();               true }
-                "reply"        -> { handleReply(arg);              true }
-                "resolve"      -> { handleResolve(arg);            true }
-                "leads"        -> { println(viewModel.getLeadsList()); true }
-                "lead"         -> { println(viewModel.getLeadDetail(arg ?: "")); true }
-                "timeline"     -> { println(viewModel.getTimeline(arg)); true }
-                "events"       -> { println(viewModel.getEventLog());    true }
-                "outbox"       -> { println(viewModel.getOutbox());      true }
-                "inbox"        -> { println(viewModel.getInbox());       true }
-                "links"        -> { println(viewModel.getBookingLinks()); true }
-                "interventions"-> { println(viewModel.getLeadsNeedingIntervention()); true }
-                "demo"         -> { println(viewModel.runDemo());  true }
-                "help"         -> { printWelcome();                true }
-                "exit", "quit" -> false
-                ""             -> true
-                else           -> { println("Unknown command: '$cmd'. Type 'help'."); true }
+        coroutineScope {
+            // Thread 2 — async result printer
+            val resultPrinterJob = launch {
+                viewModel.resultsFlow.collect { displayText ->
+                    printAsyncResult(displayText)
+                }
             }
+
+            // Thread 1 — input loop
+            var running = true
+            while (running) {
+                print("\nsdr> ")
+                System.out.flush()
+                val line  = withContext(Dispatchers.IO) { readlnOrNull() }?.trim() ?: break
+                val parts = line.split(" ", limit = 2)
+                val cmd   = parts[0].lowercase()
+                val arg   = parts.getOrNull(1)?.trim()
+
+                running = when (cmd) {
+                    "new-lead"      -> { handleNewLead();                        true }
+                    "reply"         -> { handleReply(arg);                       true }
+                    "resolve"       -> { handleResolve(arg);                     true }
+                    "leads"         -> { println(viewModel.getLeadsList());       true }
+                    "lead"          -> { println(viewModel.getLeadDetail(arg ?: "")); true }
+                    "events"      -> { println(viewModel.getTimeline(arg));     true }
+                    "all-events"        -> { println(viewModel.getEventLog());        true }
+                    "outbox"        -> { println(viewModel.getOutbox());          true }
+                    "inbox"         -> { println(viewModel.getInbox());           true }
+                    "links"         -> { println(viewModel.getBookingLinks());    true }
+                    "interventions" -> { println(viewModel.getLeadsNeedingIntervention()); true }
+                    "demo"          -> { println(viewModel.runDemo());            true }
+                    "help"          -> { printWelcome();                          true }
+                    "exit", "quit"  -> false
+                    ""              -> true
+                    else            -> { println("Unknown command: '$cmd'. Type 'help'."); true }
+                }
+            }
+
+            resultPrinterJob.cancelAndJoin()
         }
         println("\nGoodbye! 👋")
     }
 
-    // ── Input collectors ──────────────────────────────────────────────────────
+    // ── Async command handlers (fire-and-forget) ──────────────────────────────
 
     private suspend fun handleNewLead() {
         val name    = prompt("Lead name")             ?: return
         val email   = prompt("Lead email")            ?: return
         val company = prompt("Lead company")          ?: return
         val message = prompt("Their initial message") ?: return
-        println("\n🔄 Processing…")
-        println(viewModel.handleNewLead(name, email, company, message))
+        viewModel.submitNewLead(name, email, company, message)
+        println("🔄 Processing… (result will appear when ready)")
     }
 
     private suspend fun handleReply(arg: String?) {
         val leadEmail = arg ?: run { println("Usage: reply <email>"); return }
         if (!viewModel.leadExists(leadEmail)) { println("Lead '$leadEmail' not found. Use 'leads'."); return }
         val reply = prompt("Lead reply text") ?: return
-        println("\n🔄 Processing reply…")
-        println(viewModel.handleReply(leadEmail, reply))
+        viewModel.submitReply(leadEmail, reply)
+        println("🔄 Processing reply… (result will appear when ready)")
     }
 
     private suspend fun handleResolve(arg: String?) {
@@ -71,8 +93,24 @@ class SdrConsoleView(private val viewModel: SdrViewModel) {
         }
         println(viewModel.getLeadForEscalationPrompt(leadEmail))
         val response = prompt("Your response as human reviewer") ?: return
-        println("\n🔄 Resuming agent…")
-        println(viewModel.handleResolveEscalation(leadEmail, response))
+        viewModel.submitResolveEscalation(leadEmail, response)
+        println("🔄 Resuming agent… (result will appear when ready)")
+    }
+
+    // ── Result printer (Thread 2 callback) ───────────────────────────────────
+
+    /**
+     * Prints a completed agent result with a visual separator.
+     * Called from the result-printer coroutine — never blocks the input loop.
+     * Reprints the `sdr>` prompt afterward so the user knows they can keep typing.
+     */
+    private fun printAsyncResult(displayText: String) {
+        println()
+        println("  ┌─ 🤖 Agent Result ──────────────────────────────────────────")
+        displayText.lines().forEach { println("  │  $it") }
+        println("  └────────────────────────────────────────────────────────────")
+        print("\nsdr> ")
+        System.out.flush()
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -93,15 +131,15 @@ class SdrConsoleView(private val viewModel: SdrViewModel) {
             ║   new-lead          Submit a new inbound lead         ║
             ║   reply  <email>    Simulate a lead reply             ║
             ║   resolve <email>   Provide human escalation response ║
-            ║   leads             List all leads with status        ║
+            ║   leads             Show list all leads with status   ║
             ║   lead   <email>    Show lead detail                  ║
-            ║   timeline [email]  Show event timeline               ║
-            ║   events            Show global system event log      ║
+            ║   all-events        Show global system event log      ║
+            ║   events <email>    Show event of lead                ║
             ║   outbox            Show all sent emails              ║
             ║   inbox             Show all received emails          ║
             ║   links             Show all booking links            ║
             ║   interventions     Leads needing human attention     ║
-            ║   demo              Run automated 3-scenario demo     ║
+            ║   demo              Run automated scenarios demo      ║
             ║   help / exit                                         ║
             ╚═══════════════════════════════════════════════════════╝
         """.trimIndent())

@@ -14,7 +14,7 @@ sealed interface LeadStatus {
     data object AwaitingClientResponse : LeadStatus
 
     /** Does not meet qualification criteria — terminal. */
-    data object Disqualified : LeadStatus
+    data class Disqualified(val reason: String) : LeadStatus
 
     /**
      * All qualification fields present and agent decided to qualify — terminal.

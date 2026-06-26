@@ -2,6 +2,7 @@ package org.example.repositiories
 
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,8 +14,13 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.example.debug.DebugLogger
 import org.example.llm.LlmClient
+import org.example.llm.LlmSendException
+import org.example.sdr.BookingLinkReason
 import org.example.sdr.Event
+import org.example.sdr.EmailDirection
+import org.example.sdr.EmailMessage
 import org.example.sdr.HumanEscalation
 import org.example.sdr.Lead
 import org.example.sdr.QualificationConfig
@@ -85,8 +91,15 @@ class SdrRepository(
     }
 
     suspend fun emitResult(leadEmail: String, text: String) {
-        _pendingResults.remove(leadEmail)?.complete(text)
-        _results.emit(ProcessingResult(leadEmail, text))
+        val deferred = _pendingResults.remove(leadEmail)
+        if (deferred != null) {
+            // Caller is blocking with awaitResult (e.g. demo) — deliver directly, skip SharedFlow
+            // to avoid double-printing in the dual-thread result printer.
+            deferred.complete(text)
+        } else {
+            // Fire-and-forget path — publish to SharedFlow so the async result printer picks it up.
+            _results.emit(ProcessingResult(leadEmail, text))
+        }
     }
 
     // ── Work submission — per-lead mutex + fresh orchestrator per request ──────
@@ -115,7 +128,7 @@ class SdrRepository(
         scope.launch {
             leadMutex(leadEmail).withLock {
                 tryWithAllClients(leadEmail) { ctx ->
-                    SdrOrchestrator(ctx).resolveEscalation(leadEmail, humanResponse)
+                    SdrOrchestrator(ctx).resolveEscalation(humanResponse)
                 }
             }
         }
@@ -127,24 +140,27 @@ class SdrRepository(
 
     // ── Private ───────────────────────────────────────────────────────────────
 
-    /**
-     * Tries each LLM client in order. Returns on first success.
-     * Only calls [handleOrchestrationError] when ALL clients fail.
-     */
     private suspend fun tryWithAllClients(
         leadEmail: String,
         block: suspend (OrchestratorContext) -> Unit
     ) {
-        var lastException: Exception? = null
+        var lastLlmException: LlmSendException? = null
         for (client in llmClients) {
             try {
                 block(createContext(leadEmail, client))
                 return
+            } catch (e: CancellationException) {
+                throw e  // coroutine contract — always re-throw immediately
+            } catch (e: LlmSendException) {
+                DebugLogger.llmClientFailure(client::class.simpleName ?: "LLMClient", e.message)
+                lastLlmException = e
             } catch (e: Exception) {
-                lastException = e
+                DebugLogger.orchestrationBug(leadEmail, e)
+                handleOrchestrationError(leadEmail, e)
+                return
             }
         }
-        handleOrchestrationError(leadEmail, lastException ?: Exception("All LLM clients failed"))
+        handleOrchestrationError(leadEmail, lastLlmException ?: Exception("All LLM clients failed"))
     }
 
     private suspend fun handleOrchestrationError(leadEmail: String, e: Exception) {
@@ -161,12 +177,32 @@ class SdrRepository(
         val fallbackLink = emailRepository.createFallbackBookingLink(leadEmail)
         lead.status = LeadStatus.ApprovedLlmFailed(fallbackLink)
         _leads[leadEmail] = lead
+        logEvent(Event.BookingLinkCreated(leadEmail = leadEmail, bookingLink = fallbackLink, reason = BookingLinkReason.LlmFailed))
+
+        // LLM is unavailable so farewell-writer cannot run.
+        // Send a minimal hardcoded email so the lead always receives their booking link.
+        val farewellSubject = "Next steps with our team"
+        val farewellBody = """
+            Hi ${lead.name},
+
+            Thank you for reaching out. A member of our sales team will be in touch shortly.
+
+            In the meantime, you can use the link below to schedule a call at a time that suits you:
+            $fallbackLink
+
+            Best regards,
+            The Sales Team
+        """.trimIndent()
+        emailRepository.sendEmail(lead.email, farewellSubject, farewellBody)
+        lead.emailThread.add(EmailMessage(EmailDirection.OUTBOUND, farewellSubject, farewellBody))
+        _leads[leadEmail] = lead
+        logEvent(Event.EmailSent(leadEmail = leadEmail, subject = farewellSubject, body = farewellBody))
 
         logEvent(Event.ProcessingFailed(leadEmail = leadEmail, reason = reason))
         emitResult(
             leadEmail,
             "⚠️ All LLM clients failed for $leadEmail — marked ApprovedLlmFailed. " +
-            "Fallback link: $fallbackLink  (visible under 'links')"
+            "Fallback farewell sent. Link: $fallbackLink  (visible under 'links')"
         )
     }
 

@@ -2,6 +2,7 @@ package org.example.sdr_orchestrator
 
 import org.example.agent.AgentConfig
 import org.example.agent.AiAgent
+import org.example.llm.LlmSendException
 import org.example.sdr.*
 import org.example.sdr_orchestrator.sdr_actions.CreateBookingLinkAction
 import org.example.sdr_orchestrator.sdr_actions.DisqualifyLeadAction
@@ -18,13 +19,17 @@ import org.example.sdr_orchestrator.sdt_tools.GetLeadStateTool
  * Holds no mutable state of its own. All reads and writes flow through [OrchestratorContext],
  * which scopes the orchestrator, its actions, and its tools to a single lead.
  *
- * Pipeline:
- *  process (new or reply)  →  escalationDetector
- *                          →  leadReadiness
- *                          →  qualificationExtractor
- *                          →  infoSufficiency
- *                          →  dealDecision  |  outreachWriter / followUpWriter
- *  resolveEscalation       →  dealDecision  |  ApprovedSalesTeamAsk
+ * Pipeline (new lead):  spamDetector → qualificationExtractor → escalationDetector
+ *                       → initialIntentChecker → infoSufficiency
+ *                       → dealDecision  |  outreachWriter → emailReviewer → emailSanityChecker
+ * Pipeline (reply):     qualificationExtractor → escalationDetector → leadReadiness
+ *                       → infoSufficiency
+ *                       → dealDecision  |  followUpWriter → emailReviewer → emailSanityChecker
+ * resolveEscalation:    infoSufficiency → dealDecision  |  followUpWriter  |  ApprovedSalesTeamAsk
+ *
+ * Farewell policy: whenever a booking link is issued (any terminal state except ApprovedLlmFailed),
+ * [sendFarewellEmail] sends a personalised closing email with the link. This email bypasses the
+ * follow-up cap and is always sent — even a minimal fallback if the LLM is unavailable.
  */
 class SdrOrchestrator(private val ctx: OrchestratorContext) {
     // ── Action instances ──────────────────────────────────────────────────────
@@ -132,6 +137,98 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         tools    = emptyMap(),
         actions  = emptyMap(),
         maxDepth = 2, timeoutMs = 15_000L, maxHistorySize = 5
+    ))
+
+    private val farewellWriter = AiAgent(AgentConfig(
+        agentId      = "farewell-writer",
+        workOnId     = ctx.leadEmail,
+        llmClient    = ctx.llmClient,
+        systemPrompt = """
+            You write the final farewell email sent to a lead who has been qualified or handed
+            off to the sales team. This is the last email they will receive from us.
+
+            Call getLeadState to review the full conversation history.
+            Then write a warm, concise farewell email (3–4 sentences) that:
+              • Acknowledges the conversation personally — reference one specific detail the lead shared.
+              • Presents the booking link naturally (e.g. "use the link below to schedule a call").
+              • Expresses genuine enthusiasm about the next step.
+              • Signs as "The Sales Team".
+
+            Never reveal you are an AI. Never use placeholder text like [Your Name] or [Company].
+
+            Your ENTIRE response must be in this exact format (nothing else):
+            SUBJECT: <subject line>
+            BODY:
+            <full email body>
+        """.trimIndent(),
+        tools   = mapOf("getLeadState" to GetLeadStateTool(ctx)),
+        actions = emptyMap(),
+        maxDepth = 3, timeoutMs = 30_000L, maxHistorySize = 15
+    ))
+
+    private val spamDetector = AiAgent(AgentConfig(
+        agentId      = "spam-detector",
+        workOnId     = ctx.leadEmail,
+        llmClient    = ctx.llmClient,
+        systemPrompt = """
+            You decide whether an inbound lead message is a genuine business enquiry
+            or spam / garbage that should be discarded immediately.
+
+            Respond with REAL if the message:
+              • Comes from someone who appears to be a real person with a business need.
+              • Contains any meaningful content, even if very short (e.g. "hi", "I need help").
+              • Mentions a company, role, problem, or topic — however briefly.
+              When in doubt, respond REAL. We prefer to qualify a bad lead over losing a real one.
+
+            Respond with SPAM if the message is clearly:
+              • Random characters, keyboard mashing, or gibberish (e.g. "asdfgh", "zzzzz").
+              • An automated bot message or a known spam template.
+              • Completely empty or whitespace-only after trimming.
+              • Entirely off-topic with zero business relevance (e.g. "buy cheap meds now").
+
+            Respond with ONLY "REAL" or "SPAM". No explanation, no other text.
+        """.trimIndent(),
+        tools    = emptyMap(),
+        actions  = emptyMap(),
+        maxDepth = 1, timeoutMs = 15_000L, maxHistorySize = 3
+    ))
+
+    private val initialIntentChecker = AiAgent(AgentConfig(
+        agentId      = "initial-intent-checker",
+        workOnId     = ctx.leadEmail,
+        llmClient    = ctx.llmClient,
+        systemPrompt = """
+            Single purpose: classify the intent of a lead's FIRST message — before any SDR email
+            has been sent. Output exactly one of four tokens.
+
+            CLIENT_WANTS_HUMAN — respond with this if the lead clearly and explicitly:
+              • Asks to speak with a human, a real person, or an account manager.
+              • Says they do not want automated or bot communication.
+              • Expresses hostility or frustration even in the first message.
+              This takes absolute priority — check this FIRST.
+
+            IRRELEVANT — respond with this (only if CLIENT_WANTS_HUMAN does not apply) if:
+              • The message has zero connection to a B2B software or business need.
+              • The lead is asking about something entirely unrelated to our domain
+                (e.g. requesting information about consumer products, personal topics,
+                motorcycles, cooking, travel — anything with no plausible B2B angle).
+              • There is no reasonable interpretation under which this could be a sales enquiry.
+
+            DECIDE_NOW — respond with this (only if neither above applies) if:
+              • The lead has provided all three qualification fields in their first message:
+                use case (clear business problem), team size (explicit number), AND commercial
+                intent (active buying signal). All three must be present and unambiguous.
+
+            PROCEED — respond with this if none of the above applies:
+              • The lead gave a normal introduction, a partial description, or just said "hi".
+              • We should send a personalised outreach email and continue the qualification process.
+
+            Respond with ONLY one token: CLIENT_WANTS_HUMAN, IRRELEVANT, DECIDE_NOW, or PROCEED.
+            No explanation, no other text.
+        """.trimIndent(),
+        tools    = emptyMap(),
+        actions  = emptyMap(),
+        maxDepth = 1, timeoutMs = 15_000L, maxHistorySize = 5
     ))
 
     private val escalationDetector = AiAgent(AgentConfig(
@@ -353,10 +450,13 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         val body    = bestBody
 
         if (subject == null || body == null) {
-            throw IllegalStateException(
-                "Email writer '${writer.hashCode()}' never produced a parseable SUBJECT/BODY draft " +
-                "after ${ctx.config.maxEmailDraftRetries} attempts for lead <$leadEmail>. " +
-                "LLM responses were likely malformed due to rate-limiting or API errors."
+            throw LlmSendException(
+                agentId       = "email-writer",
+                providerName  = ctx.llmClient::class.simpleName ?: "LLM",
+                modelName     = "unknown",
+                errorMessage  = "Writer never produced a parseable SUBJECT/BODY draft after " +
+                    "${ctx.config.maxEmailDraftRetries} attempts for lead <$leadEmail>. " +
+                    "LLM responses were likely malformed (rate-limiting or API errors)."
             )
         }
 
@@ -367,11 +467,61 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
             return Pair(subject, body)
         }
 
-        throw IllegalStateException(
-            "Email draft for lead <$leadEmail> failed strict review after " +
-            "${ctx.config.maxEmailDraftRetries} attempts and was rejected by the sanity checker. " +
-            "Reason: $sanityResult"
+        throw LlmSendException(
+            agentId       = "email-sanity-checker",
+            providerName  = ctx.llmClient::class.simpleName ?: "LLM",
+            modelName     = "unknown",
+            errorMessage  = "Draft for lead <$leadEmail> failed strict review after " +
+                "${ctx.config.maxEmailDraftRetries} attempts and was rejected by the sanity checker. " +
+                "Reason: $sanityResult"
         )
+    }
+
+    /**
+     * Sends a personalised farewell email with [bookingLink] to the lead.
+     *
+     * This email bypasses the follow-up cap — it is always sent once a booking link is issued.
+     * If the LLM fails, a minimal template fallback is used so the lead always receives the link.
+     * Does NOT increment [Lead.followUpCount].
+     */
+    private suspend fun sendFarewellEmail(bookingLink: String) {
+        val lead = ctx.getLead() ?: return
+
+        val (subject, body) = try {
+            val draftText = farewellWriter.processInput(
+                "Lead email: ${ctx.leadEmail}\n" +
+                "Booking link to include: $bookingLink\n\n" +
+                lead.toContextString() +
+                "\nWrite the farewell email with the booking link."
+            )
+            parseDraft(draftText) ?: Pair(
+                "Your next steps with us",
+                "Thank you for your time. Here is your booking link to connect with our team:\n$bookingLink\n\nThe Sales Team"
+            )
+        } catch (e: LlmSendException) {
+            Pair(
+                "Your next steps with us",
+                "Thank you for your time. Here is your booking link to connect with our team:\n$bookingLink\n\nThe Sales Team"
+            )
+        }
+
+        val currentLead = ctx.getLead() ?: return
+        ctx.sendEmail(currentLead.email, subject, body)
+        currentLead.emailThread.add(EmailMessage(EmailDirection.OUTBOUND, subject, body))
+        ctx.saveLead(currentLead)
+        ctx.logEvent(Event.EmailSent(leadEmail = ctx.leadEmail, subject = subject, body = body))
+    }
+
+    /**
+     * Runs [dealDecision] and, if it qualifies the lead, sends a farewell email with the booking link.
+     */
+    private suspend fun decideAndFarewell(prompt: String): String {
+        val result = dealDecision.processInput(prompt)
+        val updatedLead = ctx.getLead()
+        if (updatedLead?.status == LeadStatus.Qualified) {
+            updatedLead.bookingLink?.let { sendFarewellEmail(it) }
+        }
+        return result
     }
 
     // ── Public API — all methods return Unit, results flow to repository ───────
@@ -392,6 +542,20 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
             lead = newLead
             ctx.saveLead(lead)
             ctx.logEvent(Event.LeadReceived(leadEmail = scopedLeadEmail))
+
+            // Step 0 (new leads only): Spam gate — disqualify junk before touching anything else
+            val spamResult = spamDetector.processInput(
+                "Lead email: $scopedLeadEmail\n" +
+                "Initial message:\n\"$messageText\""
+            ).trim()
+            if (spamResult.startsWith("SPAM")) {
+                val disqualifyResult = DisqualifyLeadAction(ctx).perform(
+                    "sdr_orchestrator",
+                    mapOf("leadEmail" to scopedLeadEmail, "reason" to "Spam or non-genuine enquiry detected on initial message.")
+                )
+                ctx.emitResult("🗑️ $disqualifyResult")
+                return
+            }
         } else {
             val loaded = ctx.getLead()
             if (loaded == null) {
@@ -446,47 +610,105 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
             return
         }
 
-        // Step 3: Readiness check
-        val readiness = leadReadiness.processInput(
-            "Lead email: $scopedLeadEmail\n" +
-            "Latest message from lead:\n\"$messageText\"\n\n" +
-            refreshedContext
-        ).trim()
-
-        if (readiness.startsWith("CLIENT_WANTS_HUMAN")) {
-            val currentLead = ctx.getLead() ?: run {
-                ctx.emitResult("Error: Lead '$scopedLeadEmail' not found.")
-                return
-            }
-            val link = ctx.createClientAskBookingLink()
-            currentLead.status = LeadStatus.ApprovedClientAsk(link)
-            currentLead.bookingLink = link
-            ctx.saveLead(currentLead)
-            ctx.logEvent(Event.BookingLinkCreated(leadEmail = scopedLeadEmail, bookingLink = link))
-            ctx.emitResult(
-                "🙋 Lead ${currentLead.name} requested human contact. " +
-                "Status → ApprovedClientAsk. Booking link: $link"
-            )
-            return
-        }
-
-        if (readiness.startsWith("DECIDE_NOW")) {
-            val currentLead = ctx.getLead() ?: run {
-                ctx.emitResult("Error: Lead '$scopedLeadEmail' not found.")
-                return
-            }
-            val result = dealDecision.processInput(
+        // Step 3: Intent / readiness check
+        val remainingFollowUps = ctx.config.maxFollowUps - extractedLead.followUpCount
+        if (isFirstMessage) {
+            // New lead — check initial intent: human request, immediate decision, or normal proceed
+            val intent = initialIntentChecker.processInput(
                 "Lead email: $scopedLeadEmail\n" +
-                    "Reason for immediate decision: lead readiness check returned DECIDE_NOW.\n" +
-                    currentLead.toContextString() +
-                    "\nMake the final deal decision now with the data available."
-            )
-            ctx.emitResult(result)
-            return
+                "Initial message:\n\"$messageText\"\n\n" +
+                refreshedContext
+            ).trim()
+
+            if (intent.startsWith("CLIENT_WANTS_HUMAN")) {
+                val currentLead = ctx.getLead() ?: run {
+                    ctx.emitResult("Error: Lead '$scopedLeadEmail' not found.")
+                    return
+                }
+                val link = ctx.createClientAskBookingLink()
+                currentLead.status = LeadStatus.ApprovedClientAsk(link)
+                currentLead.bookingLink = link
+                ctx.saveLead(currentLead)
+                ctx.logEvent(Event.BookingLinkCreated(leadEmail = scopedLeadEmail, bookingLink = link, reason = BookingLinkReason.ClientRequestedHuman))
+                sendFarewellEmail(link)
+                ctx.emitResult(
+                    "🙋 Lead ${currentLead.name} requested human contact on first message. " +
+                    "Status → ApprovedClientAsk. Booking link: $link"
+                )
+                return
+            }
+
+            if (intent.startsWith("IRRELEVANT")) {
+                val result = DisqualifyLeadAction(ctx).perform(
+                    "sdr_orchestrator",
+                    mapOf(
+                        "leadEmail" to scopedLeadEmail,
+                        "reason" to "Initial message is unrelated to our business domain."
+                    )
+                )
+                ctx.emitResult("🚫 $result")
+                return
+            }
+
+            if (intent.startsWith("DECIDE_NOW")) {
+                val currentLead = ctx.getLead() ?: run {
+                    ctx.emitResult("Error: Lead '$scopedLeadEmail' not found.")
+                    return
+                }
+                val result = decideAndFarewell(
+                    "Lead email: $scopedLeadEmail\n" +
+                        "Reason: lead provided all qualification data in their first message.\n" +
+                        currentLead.toContextString() +
+                        "\nMake the final deal decision now."
+                )
+                ctx.emitResult(result)
+                return
+            }
+            // PROCEED — fall through to infoSufficiency + outreachWriter
+        } else {
+            // Reply — check behaviour patterns across the full conversation history
+            val readiness = leadReadiness.processInput(
+                "Lead email: $scopedLeadEmail\n" +
+                "Remaining follow-up budget: $remainingFollowUps / ${ctx.config.maxFollowUps}\n" +
+                "Latest message from lead:\n\"$messageText\"\n\n" +
+                refreshedContext
+            ).trim()
+
+            if (readiness.startsWith("CLIENT_WANTS_HUMAN")) {
+                val currentLead = ctx.getLead() ?: run {
+                    ctx.emitResult("Error: Lead '$scopedLeadEmail' not found.")
+                    return
+                }
+                val link = ctx.createClientAskBookingLink()
+                currentLead.status = LeadStatus.ApprovedClientAsk(link)
+                currentLead.bookingLink = link
+                ctx.saveLead(currentLead)
+                ctx.logEvent(Event.BookingLinkCreated(leadEmail = scopedLeadEmail, bookingLink = link, reason = BookingLinkReason.ClientRequestedHuman))
+                sendFarewellEmail(link)
+                ctx.emitResult(
+                    "🙋 Lead ${currentLead.name} requested human contact. " +
+                    "Status → ApprovedClientAsk. Booking link: $link"
+                )
+                return
+            }
+
+            if (readiness.startsWith("DECIDE_NOW")) {
+                val currentLead = ctx.getLead() ?: run {
+                    ctx.emitResult("Error: Lead '$scopedLeadEmail' not found.")
+                    return
+                }
+                val result = decideAndFarewell(
+                    "Lead email: $scopedLeadEmail\n" +
+                        "Reason for immediate decision: lead readiness check returned DECIDE_NOW.\n" +
+                        currentLead.toContextString() +
+                        "\nMake the final deal decision now with the data available."
+                )
+                ctx.emitResult(result)
+                return
+            }
         }
 
         // Step 4: Sufficiency check (qualification already extracted in Step 1)
-        val remainingFollowUps = ctx.config.maxFollowUps - extractedLead.followUpCount
         val sufficiency = infoSufficiency.processInput(
             "Lead email: $scopedLeadEmail | Remaining follow-up budget: $remainingFollowUps\n" +
                 extractedLead.toContextString()
@@ -494,7 +716,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
 
         val result = when {
             sufficiency.startsWith("DECIDE_NOW") || sufficiency.startsWith("DISQUALIFY_NOW") ->
-                dealDecision.processInput(
+                decideAndFarewell(
                     "Lead email: $scopedLeadEmail\n" +
                         "Sufficiency assessment: $sufficiency\n" +
                         extractedLead.toContextString() +
@@ -525,7 +747,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         ctx.emitResult(result)
     }
 
-    suspend fun resolveEscalation(leadEmail: String, humanResponse: String) {
+    suspend fun resolveEscalation(humanResponse: String) {
         val scopedLeadEmail = ctx.leadEmail
         val lead = ctx.getLead()
         if (lead == null) {
@@ -543,7 +765,6 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         ctx.saveLead(lead)
         ctx.logEvent(Event.HumanEscalationResolved(leadEmail = scopedLeadEmail, humanResponse = humanResponse))
 
-        val hasAllFields = lead.useCase != null && lead.teamSize != null && lead.commercialIntent != null
         val remainingFollowUps = ctx.config.maxFollowUps - lead.followUpCount
 
         // Ask infoSufficiency to interpret the human's intent AND the current data state.
@@ -562,9 +783,10 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
 
         val result = when {
             sufficiency.startsWith("DECIDE_NOW") || sufficiency.startsWith("DISQUALIFY_NOW") -> {
+                val hasAllFields = lead.useCase != null && lead.teamSize != null && lead.commercialIntent != null
                 if (hasAllFields) {
-                    dealDecision.processInput(
-                        "Lead email: $leadEmail\n" +
+                    decideAndFarewell(
+                        "Lead email: $scopedLeadEmail\n" +
                             "A human sales representative resolved an escalation.\n" +
                             "Human said: \"$humanResponse\"\n" +
                             "The human's response is authoritative — honour it in your decision.\n" +
@@ -577,7 +799,8 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
                     lead.status = LeadStatus.ApprovedSalesTeamAsk(link)
                     lead.bookingLink = link
                     ctx.saveLead(lead)
-                    ctx.logEvent(Event.BookingLinkCreated(leadEmail = scopedLeadEmail, bookingLink = link))
+                    ctx.logEvent(Event.BookingLinkCreated(leadEmail = scopedLeadEmail, bookingLink = link, reason = BookingLinkReason.SalesTeamHandoff))
+                    sendFarewellEmail(link)
                     "🤝 Lead ${lead.name} passed forward by sales team (data incomplete). " +
                     "Status → ApprovedSalesTeamAsk. Booking link: $link"
                 }

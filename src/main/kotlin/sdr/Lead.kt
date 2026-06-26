@@ -49,7 +49,7 @@ data class Lead(
         val statusLabel = when (val s = status) {
             is LeadStatus.New                    -> "NEW"
             is LeadStatus.AwaitingClientResponse -> "AWAITING_CLIENT_RESPONSE"
-            is LeadStatus.Disqualified           -> "DISQUALIFIED"
+            is LeadStatus.Disqualified           -> "DISQUALIFIED — reason: \"${s.reason}\""
             is LeadStatus.Qualified              -> "QUALIFIED"
             is LeadStatus.Escalated              -> "ESCALATED — ${s.escalation.reason}"
             is LeadStatus.ApprovedClientAsk      -> "APPROVED_CLIENT_ASK — link: ${s.bookingLink}"
@@ -68,6 +68,17 @@ data class Lead(
             appendLine("  Human response: ${esc.humanResponse ?: "PENDING"}")
         }
         if (bookingLink != null) appendLine("Booking link: $bookingLink")
+
+        appendLine("=== Email Conversation (${emailThread.size} messages) ===")
+        if (emailThread.isEmpty()) {
+            appendLine("  (no emails sent yet)")
+        } else {
+            emailThread.forEach { msg ->
+                val direction = if (msg.direction == EmailDirection.OUTBOUND) "→ US" else "← LEAD"
+                appendLine("  [$direction]  Subject: \"${msg.subject}\"")
+                appendLine("           Body: \"${msg.body}\"")
+            }
+        }
 
         appendLine("=== Event History (${events.size} events) ===")
         if (events.isEmpty()) {
@@ -89,7 +100,7 @@ data class Lead(
         is Event.QualificationUpdated     -> "Qualification updated — useCase=${e.useCase} teamSize=${e.teamSize} intent=${e.commercialIntent}"
         is Event.LeadQualified            -> "Lead QUALIFIED — useCase=${e.useCase} teamSize=${e.teamSize} intent=${e.commercialIntent}"
         is Event.LeadDisqualified         -> "Lead DISQUALIFIED — reason: \"${e.reason}\""
-        is Event.BookingLinkCreated       -> "Booking link issued: ${e.bookingLink}"
+        is Event.BookingLinkCreated       -> "Booking link issued (${e.reason.display}): ${e.bookingLink}"
         is Event.HumanEscalationTriggered -> "Escalated to human — reason: \"${e.reason}\" | trigger: \"${e.triggerMessage}\""
         is Event.HumanEscalationResolved  -> "Escalation resolved — human said: \"${e.humanResponse}\""
         is Event.PolicyBlocked            -> "POLICY BLOCKED [${e.policyName}]: ${e.reason}"
