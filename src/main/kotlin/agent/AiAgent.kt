@@ -1,9 +1,12 @@
 package org.example.agent
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withTimeout
 import org.example.debug.DebugLogger
 import org.example.llm.FunctionCall
+import org.example.llm.LlmSendException
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -104,22 +107,22 @@ class AiAgent(private val config: AgentConfig) {
             return "🚫 Agent '${config.agentId}' is busy ($statusDesc) and cannot accept new input.\n$historyDump"
         }
 
-        DebugLogger.agentStart(config.agentId, input)
+        DebugLogger.agentStart(config.agentId, config.workOnId, input)
 
         _history.add(AgentHistory.UserInput(text = input))
-        val result = try {
-            withTimeout(config.timeoutMs.milliseconds) {
+        try {
+            val result = withTimeout(config.timeoutMs.milliseconds) {
                 runReactLoop(depth = 0)
             }
-        } catch (e: Exception) {
-            val msg = "⏱️ [${config.agentId}] Request timed out or failed: ${e.message}"
+            DebugLogger.agentDone(config.agentId, config.workOnId, result)
+            return result
+        } catch (e: CancellationException) {
             _status = AgentStatus.Idle
-            msg
+            throw e  // always re-throw (coroutine contract; includes TimeoutCancellationException)
+        } finally {
+            clearHistory()
         }
-        clearHistory()
-
-        DebugLogger.agentDone(config.agentId, result)
-        return result
+        // All other exceptions (LLM failures, network errors) propagate to tryWithAllClients
     }
 
     /**
@@ -156,13 +159,13 @@ class AiAgent(private val config: AgentConfig) {
      *                   Defaults to 30 000 ms (30 seconds).
      * @return           The summary text, or null if the operation timed out or failed.
      */
-    suspend fun summarizeHistory(
+    private suspend fun summarizeHistory(
         maxItems:  Int  = 30,
         timeoutMs: Long = 30_000L
-    ): String? {
-        if (_history.isEmpty()) return null
+    ) {
+        if (_history.isEmpty()) return
 
-        println("\n🗜️  [${config.agentId}] Compressing history (${_history.size} items)…")
+        DebugLogger.historySummarize(config.agentId, _history.size)
 
         // ── 1. Build a readable transcript of the most recent N items ─────────
         val window = _history.takeLast(maxItems)
@@ -181,7 +184,7 @@ class AiAgent(private val config: AgentConfig) {
         }
 
         // ── 2. Ask the LLM for a summary, with a hard timeout ─────────────────
-        return try {
+        try {
             val summaryText = withTimeout(timeoutMs.milliseconds) {
                 val response = config.llmClient.sendMessage(
                     agentId               = config.agentId,
@@ -204,11 +207,8 @@ class AiAgent(private val config: AgentConfig) {
             // ── 3. Replace entire history with the single Summary entry ────────
             _history.clear()
             _history.add(AgentHistory.Summary(text = summaryText))
-
-            summaryText
-
-        } catch (e: Exception) {
-            null
+        } catch (e: LlmSendException) {
+            DebugLogger.historySummarizeError(config.agentId, e)
         }
     }
 
@@ -229,6 +229,7 @@ class AiAgent(private val config: AgentConfig) {
      * @param depth Recursion counter. Hard-stops at depth > 5 to prevent infinite loops.
      * @return The agent's final plain-text reply to the user.
      */
+    @Throws(LlmSendException::class)
     private suspend fun runReactLoop(depth: Int): String {
 
         if (depth > config.maxDepth) {
@@ -238,6 +239,10 @@ class AiAgent(private val config: AgentConfig) {
             return msg
         }
 
+        if (_history.size >= config.maxHistorySize * 0.8) {
+            summarizeHistory(maxItems = config.maxHistorySize)
+        }
+
         DebugLogger.reactLoop(config.agentId, depth)
         _status = AgentStatus.Thinking
 
@@ -245,6 +250,7 @@ class AiAgent(private val config: AgentConfig) {
 
         DebugLogger.llmRequest(
             agentId         = config.agentId,
+            workOnId        = config.workOnId,
             historySize     = _history.size,
             capabilityNames = capabilities.map { it.name }
         )
@@ -258,6 +264,7 @@ class AiAgent(private val config: AgentConfig) {
 
         DebugLogger.llmResponse(
             agentId       = config.agentId,
+            workOnId      = config.workOnId,
             textPreview   = response.textReply,
             functionCalls = response.functionCalls.map { it.functionName }
         )

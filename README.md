@@ -122,7 +122,7 @@ The system enforces a **strict unidirectional (top-down) dependency graph**. No 
 
 #### SdrOrchestrator — Stateless Service
 
-The orchestrator holds **no persistent state of its own**. Every method receives the information it needs from the repository at call time. Its sole responsibility is to coordinate the six specialised agents in the correct sequence.
+The sdr_orchestrator holds **no persistent state of its own**. Every method receives the information it needs from the repository at call time. Its sole responsibility is to coordinate the six specialised agents in the correct sequence.
 
 Each call follows a deterministic pipeline:
 
@@ -244,10 +244,10 @@ sealed interface LeadStatus {
 When a lead's reply contains any configured pricing keyword (`price`, `discount`, `cost`, `budget`, etc.), two independent layers enforce escalation:
 
 1. **Prompt layer:** The system prompt instructs every reply-processing agent to call `escalateToHuman` immediately upon detecting a pricing mention.
-2. **Code layer:** The orchestrator scans `replyText` for `pricingKeywords` before calling any agent. If a match is found, the `⚠️ PRICING KEYWORDS DETECTED` warning is injected directly into the agent's prompt, eliminating any ambiguity.
+2. **Code layer:** The sdr_orchestrator scans `replyText` for `pricingKeywords` before calling any agent. If a match is found, the `⚠️ PRICING KEYWORDS DETECTED` warning is injected directly into the agent's prompt, eliminating any ambiguity.
 3. **Action layer:** `EscalateToHumanAction` sets `lead.status = LeadStatus.Escalated(...)`. All subsequent actions that try to email or qualify the lead check for this status and reject the request with a `POLICY_BLOCKED` event.
 
-The agent **cannot resume** processing the lead until a human provides a response via `resolve <email>`, at which point the orchestrator resumes the qualification pipeline using the human's guidance as context.
+The agent **cannot resume** processing the lead until a human provides a response via `resolve <email>`, at which point the sdr_orchestrator resumes the qualification pipeline using the human's guidance as context.
 
 ### Policy Guardrails (Enforced in Kotlin, Not in Prompts)
 
@@ -270,11 +270,11 @@ The architecture was designed with this question in mind. Because `SdrOrchestrat
 
 **1. Persistent Repository**
 
-Replace the in-memory `Map<String, Lead>` with a persistent database. The event log (`_systemEvents`) maps naturally to an **append-only events table** in PostgreSQL, with the current lead state either derived by replaying events or maintained as a materialised view. The `SdrRepository` interface requires no changes — only its implementation.
+Replace the in-memory `Map<String, Lead>` with a persistent database. The event log (`_systemEvents`) maps naturally to an **append-only events table** in PostgreSQL, with the current lead state either derived by replaying events or maintained as a materialised sdr_view. The `SdrRepository` interface requires no changes — only its implementation.
 
 **2. Asynchronous Processing via Message Queue**
 
-The current model is synchronous: the CLI blocks while the LLM runs. At scale, incoming emails (webhook callbacks from a real email provider) would be pushed onto a **message queue (Kafka / RabbitMQ)**. Each message contains `{ leadEmail, replyText }`. A pool of stateless worker processes consumes the queue, each loading the lead from the DB, running the orchestrator pipeline, and writing the result back — without any shared in-process state.
+The current model is synchronous: the CLI blocks while the LLM runs. At scale, incoming emails (webhook callbacks from a real email provider) would be pushed onto a **message queue (Kafka / RabbitMQ)**. Each message contains `{ leadEmail, replyText }`. A pool of stateless worker processes consumes the queue, each loading the lead from the DB, running the sdr_orchestrator pipeline, and writing the result back — without any shared in-process state.
 
 **3. LLM Call Concurrency**
 
@@ -292,9 +292,9 @@ The per-lead `Event` log and global `_systemEvents` list map directly to a **str
 |---|---|---|
 | **Email integration** | `MockEmailService` prints to stdout | Replace with a real provider (SendGrid / Postmark) via an injectable `EmailService` interface — the actions require no changes |
 | **Entrypoint** | Interactive CLI | Expose a **REST API / Webhook endpoint** so real email providers (Gmail API, Outlook) can POST inbound replies directly; the `SdrViewModel`'s command layer maps cleanly to HTTP handlers |
-| **Structured LLM output** | Agents respond with free text; the orchestrator parses keywords (`ESCALATED`, `DECIDE_NOW`) | Enforce **JSON schema responses** via Gemini's structured output / function-calling API for all routing agents, making the pipeline deterministic and testable without LLM calls |
+| **Structured LLM output** | Agents respond with free text; the sdr_orchestrator parses keywords (`ESCALATED`, `DECIDE_NOW`) | Enforce **JSON schema responses** via Gemini's structured output / function-calling API for all routing agents, making the pipeline deterministic and testable without LLM calls |
 | **Persistence** | In-memory `HashMap` | PostgreSQL + JPA / Exposed — the `SdrRepository` interface is already the only database boundary |
-| **Testing** | No automated tests | Unit-test every `Action` and `Tool` with a mock repository; integration-test the orchestrator pipeline with a stubbed `LlmClient` |
+| **Testing** | No automated tests | Unit-test every `Action` and `Tool` with a mock repository; integration-test the sdr_orchestrator pipeline with a stubbed `LlmClient` |
 | **Multi-tenancy** | Single qualification config | Parameterise `QualificationConfig` per-tenant, stored in DB — the entire agent pipeline is already config-driven |
 
 ---
@@ -325,7 +325,7 @@ src/main/kotlin/
 │   └── HumanEscalation.kt         # Escalation payload (embedded in LeadStatus.Escalated)
 ├── repositiories/
 │   └── SdrRepository.kt           # Pure data layer — leads + global event log
-├── orchestrator/
+├── sdr_orchestrator/
 │   └── SdrOrchestrator.kt         # Stateless coordinator of 6 specialised AiAgents
 ├── agent/
 │   ├── AiAgent.kt                 # Generic ReAct loop (clears history after each run)
@@ -344,9 +344,9 @@ src/main/kotlin/
 ├── mock/
 │   ├── MockEmailService.kt        # Simulates email delivery (prints to stdout)
 │   └── MockBookingService.kt      # Generates mock calendar booking URLs
-├── view/
+├── sdr_view/
 │   └── SdrConsoleView.kt          # Pure I/O — stdin/stdout only
-├── viewmodel/
+├── sdr_viewmodel/
 │   └── SdrViewModel.kt            # Routing, formatting, demo scenarios
 └── llm/
     ├── LlmClient.kt               # Interface (swap Gemini for any provider)

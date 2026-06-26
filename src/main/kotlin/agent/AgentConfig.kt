@@ -12,6 +12,8 @@ import org.example.llm.LlmClient
  * live network calls.
  *
  * @param agentId        Unique string identifier (used in logs and by [MemoryReadTool]).
+ * @param workOnId       The entity this agent is currently processing (e.g. lead email).
+ *                       Displayed in debug logs alongside [agentId] for easy tracing.
  * @param llmClient      The AI backend this agent will call.
  * @param systemPrompt   Defines the agent's persona, task, and boundaries.
  * @param tools          Read-only capabilities (CQRS "Query" side).
@@ -29,6 +31,7 @@ import org.example.llm.LlmClient
  */
 data class AgentConfig(
     val agentId: String,
+    val workOnId: String = "",
     val llmClient: LlmClient,
     val systemPrompt: String,
     val tools: Map<String, Tool> = emptyMap(),

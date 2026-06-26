@@ -16,10 +16,31 @@ sealed interface LeadStatus {
     /** Does not meet qualification criteria — terminal. */
     data object Disqualified : LeadStatus
 
-    /** All criteria met, booking link sent — terminal. */
+    /**
+     * All qualification fields present and agent decided to qualify — terminal.
+     * Booking link type: standard agent-qualified link.
+     */
     data object Qualified : LeadStatus
 
     /** Waiting for a human reviewer before the agent can continue. */
     data class Escalated(val escalation: HumanEscalation) : LeadStatus
+
+    /**
+     * Lead explicitly requested to speak with a human — terminal.
+     * Booking link type: client-ask link (dedicated channel for self-referred leads).
+     */
+    data class ApprovedClientAsk(val bookingLink: String) : LeadStatus
+
+    /**
+     * Sales team instructed to pass the lead forward, but qualification data is incomplete — terminal.
+     * Booking link type: sales-team-ask link (internal handoff, not agent-qualified).
+     */
+    data class ApprovedSalesTeamAsk(val bookingLink: String) : LeadStatus
+
+    /**
+     * All LLM clients failed — no agent decision was possible — terminal.
+     * Booking link type: fallback link (separate from all agent-driven outcomes).
+     */
+    data class ApprovedLlmFailed(val fallbackBookingLink: String) : LeadStatus
 }
 

@@ -26,6 +26,7 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
         capabilities: List<AgentCapability>
     ): Any = GeminiPayload(system, history, capabilities)
 
+    @Throws(LlmSendException::class)
     override suspend fun executeNetworkCall(agentId: String, payload: Any): LlmResponse {
         val req = payload as GeminiPayload
         return withContext(Dispatchers.IO) {

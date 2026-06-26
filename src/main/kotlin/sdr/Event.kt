@@ -76,4 +76,10 @@ sealed interface Event {
         val decision: String,
         val reason: String
     ) : Event
+
+    data class ProcessingFailed(
+        override val leadEmail: String,
+        override val timestamp: Long = System.currentTimeMillis(),
+        val reason: String
+    ) : Event
 }

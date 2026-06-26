@@ -32,6 +32,11 @@ data class Lead(
     val events: MutableList<Event> = mutableListOf(),
     val createdAt: Long = System.currentTimeMillis()
 ) {
+    /** Returns a deep copy — mutable lists are not shared with the original. */
+    fun deepCopy() = copy(
+        emailThread = emailThread.toMutableList(),
+        events      = events.toMutableList()
+    )
     /**
      * Full context snapshot sent to agents on each turn.
      * Includes current state AND the complete event history so agents understand
@@ -47,6 +52,9 @@ data class Lead(
             is LeadStatus.Disqualified           -> "DISQUALIFIED"
             is LeadStatus.Qualified              -> "QUALIFIED"
             is LeadStatus.Escalated              -> "ESCALATED — ${s.escalation.reason}"
+            is LeadStatus.ApprovedClientAsk      -> "APPROVED_CLIENT_ASK — link: ${s.bookingLink}"
+            is LeadStatus.ApprovedSalesTeamAsk   -> "APPROVED_SALES_TEAM_ASK — link: ${s.bookingLink}"
+            is LeadStatus.ApprovedLlmFailed      -> "APPROVED_LLM_FAILED — fallback: ${s.fallbackBookingLink}"
         }
         appendLine("Status: $statusLabel | Outreach sent: $outreachSent | Follow-ups: $followUpCount")
         appendLine("Qualification:")
@@ -75,17 +83,18 @@ data class Lead(
     }
 
     private fun eventDetail(e: Event): String = when (e) {
-        is Event.LeadReceived             -> "Lead created. Initial message: \"${inboundMessage.take(120)}\""
-        is Event.EmailSent                -> "Outgoing email — subject: \"${e.subject}\" | body: \"${e.body.take(200)}\""
-        is Event.ReplyReceived            -> "Lead replied: \"${e.body.take(200)}\""
+        is Event.LeadReceived             -> "Lead created. Initial message: \"${inboundMessage}\""
+        is Event.EmailSent                -> "Outgoing email — subject: \"${e.subject}\" | body: \"${e.body}\""
+        is Event.ReplyReceived            -> "Lead replied: \"${e.body}\""
         is Event.QualificationUpdated     -> "Qualification updated — useCase=${e.useCase} teamSize=${e.teamSize} intent=${e.commercialIntent}"
         is Event.LeadQualified            -> "Lead QUALIFIED — useCase=${e.useCase} teamSize=${e.teamSize} intent=${e.commercialIntent}"
         is Event.LeadDisqualified         -> "Lead DISQUALIFIED — reason: \"${e.reason}\""
         is Event.BookingLinkCreated       -> "Booking link issued: ${e.bookingLink}"
-        is Event.HumanEscalationTriggered -> "Escalated to human — reason: \"${e.reason}\" | trigger: \"${e.triggerMessage.take(120)}\""
-        is Event.HumanEscalationResolved  -> "Escalation resolved — human said: \"${e.humanResponse.take(200)}\""
+        is Event.HumanEscalationTriggered -> "Escalated to human — reason: \"${e.reason}\" | trigger: \"${e.triggerMessage}\""
+        is Event.HumanEscalationResolved  -> "Escalation resolved — human said: \"${e.humanResponse}\""
         is Event.PolicyBlocked            -> "POLICY BLOCKED [${e.policyName}]: ${e.reason}"
-        is Event.AgentDecision            -> "Agent decision — ${e.decision}: ${e.reason.take(120)}"
+        is Event.AgentDecision            -> "Agent decision — ${e.decision}: ${e.reason}"
+        is Event.ProcessingFailed         -> "⚠️ PROCESSING FAILED: ${e.reason}"
     }
 }
 

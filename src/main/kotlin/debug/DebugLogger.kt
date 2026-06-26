@@ -24,18 +24,18 @@ object DebugLogger {
 
     // ── Section separators ────────────────────────────────────────────────────
 
-    fun agentStart(agentId: String, input: String) {
+    fun agentStart(agentId: String, workOnId: String, input: String) {
         if (!enabled) return
         println()
-        println("$CYAN╔══ 🤖 AGENT START [$agentId]  ${ts()} ══$RESET")
+        println("$CYAN╔══ 🤖 AGENT START [$agentId]  lead=$workOnId  ${ts()} ══$RESET")
         println("$CYAN║  INPUT PROMPT:$RESET")
         input.lines().forEach { println("$CYAN║    $RESET$it") }
         println("$CYAN╚${"═".repeat(60)}$RESET")
     }
 
-    fun agentDone(agentId: String, output: String) {
+    fun agentDone(agentId: String, workOnId: String, output: String) {
         if (!enabled) return
-        println("$GREEN╔══ ✅ AGENT DONE  [$agentId]  ${ts()} ══$RESET")
+        println("$GREEN╔══ ✅ AGENT DONE  [$agentId]  lead=$workOnId  ${ts()} ══$RESET")
         println("$GREEN║  OUTPUT:$RESET")
         output.lines().take(30).forEach { println("$GREEN║    $RESET$it") }
         if (output.lines().size > 30) println("$GREEN║    … (${output.lines().size - 30} more lines)$RESET")
@@ -45,18 +45,18 @@ object DebugLogger {
 
     // ── LLM interaction ───────────────────────────────────────────────────────
 
-    fun llmRequest(agentId: String, historySize: Int, capabilityNames: List<String>) {
+    fun llmRequest(agentId: String, workOnId: String, historySize: Int, capabilityNames: List<String>) {
         if (!enabled) return
-        println("$YELLOW  ┌─ 🧠 LLM REQUEST  [$agentId]  history=$historySize  tools=${capabilityNames}$RESET")
+        println("$YELLOW  ┌─ 🧠 LLM REQUEST  [$agentId]  lead=$workOnId  history=$historySize  tools=${capabilityNames}$RESET")
     }
 
-    fun llmResponse(agentId: String, textPreview: String?, functionCalls: List<String>) {
+    fun llmResponse(agentId: String, workOnId: String, textPreview: String?, functionCalls: List<String>) {
         if (!enabled) return
         if (functionCalls.isNotEmpty()) {
-            println("$YELLOW  │  ◀ LLM → function_calls=$functionCalls$RESET")
+            println("$YELLOW  │  ◀ LLM → [$agentId] lead=$workOnId  function_calls=$functionCalls$RESET")
         } else {
             val preview = textPreview?.take(120)?.replace("\n", " ") ?: "(null)"
-            println("$YELLOW  └─ ◀ LLM → text=\"$preview\"$RESET")
+            println("$YELLOW  └─ ◀ LLM → [$agentId] lead=$workOnId  text=\"$preview\"$RESET")
         }
     }
 
@@ -81,6 +81,18 @@ object DebugLogger {
         println("$DIM  │  ↻ ReAct depth=$depth$RESET")
     }
 
+    // ── History compression ───────────────────────────────────────────────────
+
+    fun historySummarize(agentId: String, historySize: Int) {
+        if (!enabled) return
+        println("$DIM  │  🗜️  SUMMARIZE  [$agentId]  history=$historySize → compressing…$RESET")
+    }
+
+    fun historySummarizeError(agentId: String, e: Exception) {
+        if (!enabled) return
+        println("$RED  │  ❌ SUMMARIZE FAILED  [$agentId]  ${e::class.simpleName}: ${e.message?.take(120)}$RESET")
+    }
+
     // ── ANSI colour codes ─────────────────────────────────────────────────────
 
     private const val RESET  = "\u001B[0m"
@@ -88,5 +100,6 @@ object DebugLogger {
     private const val GREEN  = "\u001B[32m"
     private const val YELLOW = "\u001B[33m"
     private const val BLUE   = "\u001B[34m"
+    private const val RED    = "\u001B[31m"
     private const val DIM    = "\u001B[2m"
 }
