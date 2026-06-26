@@ -116,22 +116,11 @@ class AiAgent(private val config: AgentConfig) {
             }
             DebugLogger.agentDone(config.agentId, config.workOnId, result)
             return result
-        } catch (e: CancellationException) {
-            _status = AgentStatus.Idle
-            throw e  // always re-throw (coroutine contract; includes TimeoutCancellationException)
         } finally {
-            clearHistory()
+            _history.clear()
+            _status = AgentStatus.Idle
         }
         // All other exceptions (LLM failures, network errors) propagate to tryWithAllClients
-    }
-
-    /**
-     * Resets the conversation history and returns the agent to [AgentStatus.Idle].
-     * Call this to start a fresh session without creating a new agent instance.
-     */
-    fun clearHistory() {
-        _history.clear()
-        _status = AgentStatus.Idle
     }
 
     /**

@@ -107,6 +107,33 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         maxDepth = 2, timeoutMs = 20_000L, maxHistorySize = 5
     ))
 
+    private val emailSanityChecker = AiAgent(AgentConfig(
+        agentId      = "email-sanity-checker",
+        workOnId     = ctx.leadEmail,
+        llmClient    = ctx.llmClient,
+        systemPrompt = """
+            You are a last-resort email safety gate. The email has already gone through
+            a strict quality reviewer but was not fully approved. Your job is NOT to
+            judge quality or style — only to decide if this email is safe to send.
+
+            Respond with SEND if ALL of the following are true:
+              • The email has a non-empty subject line.
+              • The email body is coherent and readable.
+              • There are no unfilled placeholders like [Your Name], [Company], [Link], etc.
+              • The content would not embarrass the company if a real person received it.
+
+            Respond with FAIL if ANY of the following are true:
+              • Subject or body is blank or nearly blank.
+              • The body contains bracket placeholders that were never filled in.
+              • The text is gibberish, truncated mid-sentence, or clearly malformed.
+
+            Respond with ONLY "SEND" or "FAIL". No explanation, no other text.
+        """.trimIndent(),
+        tools    = emptyMap(),
+        actions  = emptyMap(),
+        maxDepth = 2, timeoutMs = 15_000L, maxHistorySize = 5
+    ))
+
     private val escalationDetector = AiAgent(AgentConfig(
         agentId      = "escalation-detector",
         workOnId     = ctx.leadEmail,
@@ -286,8 +313,11 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         leadEmail: String
     ): Pair<String, String> {
         var feedback = ""
-        var lastSubject = ""
-        var lastBody = ""
+        // Best parseable draft seen so far — updated on every successful parse.
+        // Kept separate from lastSubject/lastBody so we always have the most
+        // recently iterated candidate available for the sanity-checker fallback.
+        var bestSubject: String? = null
+        var bestBody: String? = null
 
         repeat(ctx.config.maxEmailDraftRetries) { attempt ->
             val prompt = if (feedback.isEmpty()) writerPrompt
@@ -303,8 +333,8 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
             }
 
             val (subject, body) = parsed
-            lastSubject = subject
-            lastBody = body
+            bestSubject = subject
+            bestBody = body
 
             val reviewInput = "Review this email draft for lead <$leadEmail>:\n\nSUBJECT: $subject\nBODY:\n$body"
             val reviewResult = emailReviewer.processInput(reviewInput).trim()
@@ -315,7 +345,33 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
             feedback = reviewResult.removePrefix("REJECTED:").trim()
         }
 
-        return Pair(lastSubject, lastBody)
+        // ── Sanity-checker fallback ──────────────────────────────────────────
+        // All strict-review retries exhausted. If we have a parseable draft,
+        // let the lenient sanity checker decide whether it is safe to send.
+        // If we never got a parseable draft at all, fail immediately.
+        val subject = bestSubject
+        val body    = bestBody
+
+        if (subject == null || body == null) {
+            throw IllegalStateException(
+                "Email writer '${writer.hashCode()}' never produced a parseable SUBJECT/BODY draft " +
+                "after ${ctx.config.maxEmailDraftRetries} attempts for lead <$leadEmail>. " +
+                "LLM responses were likely malformed due to rate-limiting or API errors."
+            )
+        }
+
+        val sanityInput = "Lead: <$leadEmail>\n\nSUBJECT: $subject\nBODY:\n$body"
+        val sanityResult = emailSanityChecker.processInput(sanityInput).trim()
+
+        if (sanityResult.startsWith("SEND")) {
+            return Pair(subject, body)
+        }
+
+        throw IllegalStateException(
+            "Email draft for lead <$leadEmail> failed strict review after " +
+            "${ctx.config.maxEmailDraftRetries} attempts and was rejected by the sanity checker. " +
+            "Reason: $sanityResult"
+        )
     }
 
     // ── Public API — all methods return Unit, results flow to repository ───────
