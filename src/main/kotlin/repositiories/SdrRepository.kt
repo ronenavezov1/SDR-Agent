@@ -108,15 +108,21 @@ class SdrRepository(
 
     fun submitNewLead(lead: Lead) {
         scope.launch {
-            // Register the lead immediately — before competing for LLM resources.
-            // This guarantees the lead exists in _leads even if the LLM pool times out,
-            // so handleOrchestrationError can always send a fallback booking link.
-            save(lead)
-            logEvent(Event.LeadReceived(leadEmail = lead.email))
-
             leadMutex(lead.email).withLock {
-                tryWithAllClients(lead.email) { ctx ->
-                    SdrOrchestrator(ctx).process(newLead = lead, messageText = lead.inboundMessage)
+                if (_leads.containsKey(lead.email)) {
+                    // Same email already exists — treat the inbound message as a reply
+                    // rather than creating a duplicate lead and risking state corruption.
+                    tryWithAllClients(lead.email) { ctx ->
+                        SdrOrchestrator(ctx).process(messageText = lead.inboundMessage)
+                    }
+                } else {
+                    // Register the lead before touching the LLM pool so that
+                    // handleOrchestrationError can always find it and run the fallback path.
+                    save(lead)
+                    logEvent(Event.LeadReceived(leadEmail = lead.email))
+                    tryWithAllClients(lead.email) { ctx ->
+                        SdrOrchestrator(ctx).process(newLead = lead, messageText = lead.inboundMessage)
+                    }
                 }
             }
         }
