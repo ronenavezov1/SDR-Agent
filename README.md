@@ -429,6 +429,16 @@ The agent pipeline itself — all 12 agents, all 6 actions, all tools — requir
 
 **Prerequisites:** JDK 17+, Maven 3.8+, a [Google Gemini API key](https://aistudio.google.com/app/apikey).
 
+### Dependencies
+
+All dependencies are declared in `pom.xml` and fetched automatically by Maven — no manual installation required.
+
+| Dependency | Version | Purpose |
+|---|---|---|
+| `kotlin-stdlib` | 2.3.21 | Kotlin standard library |
+| `kotlinx-coroutines-core` | 1.10.2 | Structured concurrency, `Mutex`, `Semaphore`, `async/await` |
+| `com.google.genai:google-genai` | 1.60.0 | Google Gemini API SDK (function calling, streaming) |
+
 ### 1 — Set your API key
 
 ```bash
