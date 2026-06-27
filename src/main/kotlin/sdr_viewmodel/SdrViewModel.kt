@@ -266,11 +266,7 @@ class SdrViewModel(private val app: AppRepository) {
         appendLine(demoStep("Lead reveals solo freelancer"))
         appendLine(handleReply("alex@freelancer.dev",
             "I work alone managing around 5 client projects. Just exploring, no rush."))
-
-        appendLine("\n═".repeat(65))
-        appendLine("\n📊 Final Summary:")
-        appendLine(getLeadsList())
-        appendLine("\n📋 Event Timelines:")
+        
         appendLine("\n═".repeat(65))
         appendLine(demoSection("SCENARIO 7 — Adversarial: Prompt Injection (Jailbreak attempt)"))
         val lead7 = Lead(

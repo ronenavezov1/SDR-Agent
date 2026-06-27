@@ -251,6 +251,9 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
                 Example: SDR asked "how many people are on your team?" → lead answers "1000" → SAFE.
               • Numbers, dates, or quantities given as qualification data (team size, usage volume, etc.).
               • General enthusiasm, complaints about workload, or vague budget mentions without specifics.
+              • Statements that budget EXISTS or has been approved — this is a positive buying signal, not a negotiation.
+                Example: "budget approved", "we have budget for this", "budget confirmed" → SAFE.
+              • Asking about next steps, timelines, or how to proceed — these are buying signals, not escalations.
 
             If a genuine trigger is detected:
               1. Call escalateToHuman with a specific reason and the exact triggering quote.
