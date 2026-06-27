@@ -165,6 +165,8 @@ Each agent's "intelligence budget" is set independently via four parameters. Cur
 
 When an agent's history approaches `History Size`, it is **not dropped** — it is passed to the LLM for summarisation and replaced with a single compressed `Summary` entry. The agent retains the gist of everything it has seen without ballooning the context window.
 
+**Note on `gemini-3.5-flash` (thinking model):** This model is a *thinking* model — each function call response includes an opaque `thought_signature` byte field that must be echoed back verbatim in the next request. If it is omitted, the API returns HTTP 400 immediately (no retry possible). The `GeminiLlmClient` captures `thoughtSignature` from each response `Part` and stores it in `AgentHistory.ToolCallRequest`; `toContents()` re-attaches it when replaying history. This is a provider-specific wire detail, but it is handled transparently — no agent or orchestrator code is aware of it.
+
 | Agent | Max Depth | History Size | Timeout | Tools | Actions | LLM Model (current) |
 |---|---|---|---|---|---|---|
 | `spam-detector` | 5 | 18 | 3 min | — | — | gemini-3.5-flash |
@@ -427,18 +429,61 @@ The agent pipeline itself — all 12 agents, all 6 actions, all tools — requir
 
 ## 10. Getting Started
 
-**Prerequisites:** JDK 17+, Maven 3.8+, a Google Gemini API key.
+**Prerequisites:** JDK 17+, Maven 3.8+, a [Google Gemini API key](https://aistudio.google.com/app/apikey).
+
+### 1 — Set your API key
 
 ```bash
-# Single key
+# Single key — one LLM client in the pool
 export GOOGLE_API_KEY=your_key_here
 
-# Multiple keys for automatic failover (tried in sequence on failure)
+# Multiple keys — each becomes an independent pool slot with automatic failover
+# If one key exhausts its quota or dies, the next one takes over transparently
 export GOOGLE_API_KEY=key1,key2,key3
+```
 
-# Optional: full per-agent debug output (input + conversation history + output)
+### 2 — Build and run
+
+```bash
+mvn compile exec:java -Dexec.mainClass=org.example.MainKt
+```
+
+### 3 — Run the demo (recommended first step)
+
+At the `sdr>` prompt, type:
+
+```
+sdr> demo
+```
+
+The demo fires **9 concurrent leads** and runs them fully automatically — no input needed. When it finishes, use:
+
+```
+sdr> leads          # overview of all 9 outcomes
+sdr> all-events     # full event timeline across every lead
+sdr> links          # all booking links grouped by reason
+```
+
+#### What the demo covers
+
+| # | Lead | Scenario |
+|---|------|---------|
+| 1 | Sarah Chen @ TechCorp | ✅ Happy path — qualifies after one reply |
+| 2 | Mike Johnson @ ScaleUp.io | 🧑 Pricing escalation → human resolves → qualified |
+| 3 | Alex Williams @ Freelancer.dev | ❌ Disqualified — solo freelancer, team too small |
+| 4 | Emma Right @ FinTech Node | ✅ Multi-turn: dodges twice then qualifies |
+| 5 | David Cohen @ City Municipality | ✅ Government lead buried in compliance concerns |
+| 6 | Richard Sterling @ MegaCorp | 🧑 Missing info; VIP override by sales rep |
+| 7 | Evil Hacker @ Chaos Corp | 🛡 Prompt injection attempt — disqualified immediately |
+| 8 | Rider Dan @ Solo | ❌ Off-topic distraction — disqualified |
+| 9 | Alice @ Corp | 🛡 Cross-lead manipulation attempt |
+
+### 4 — Enable debug output (optional)
+
+Prints the full input, ReAct loop, and output for every sub-agent call — useful for understanding exactly what each agent sees and decides:
+
+```bash
 export SDR_DEBUG=true
-
 mvn compile exec:java -Dexec.mainClass=org.example.MainKt
 ```
 
@@ -457,18 +502,18 @@ QualificationConfig(
 ### CLI Commands
 
 ```
-new-lead                  Submit a new inbound lead
-reply     <email>         Simulate a lead reply
-resolve   <email>         Provide human escalation response
-leads                     List all leads with status
-lead      <email>         Full lead detail: qualification, status, events, email thread
-events    <email>         Event timeline for a specific lead
-all-events                Global system event log across all leads
-outbox                    All sent emails with full content
-inbox                     All received emails
-links                     All booking links grouped by status type
-interventions             Leads needing human attention
-demo                      Run automated 3-scenario demonstration
+new-lead                  Submit a new inbound lead (interactive prompts)
+reply     <email>         Simulate an inbound reply from a lead
+resolve   <email>         Provide human response to an escalated lead
+demo                      Run all 9 scenarios concurrently (no input needed)
+leads                     List all leads with current status
+lead      <email>         Full detail: qualification, status, events, email thread
+events    <email>         Event timeline for one lead
+all-events                Global event log across all leads
+outbox                    All sent emails with full body
+inbox                     All received replies
+links                     All booking links grouped by reason type
+interventions             Leads currently waiting for human input
 help                      Show this command list
-exit / quit               Exit the CLI
+exit / quit               Exit
 ```
