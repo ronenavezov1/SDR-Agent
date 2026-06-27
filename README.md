@@ -421,6 +421,7 @@ The agent pipeline itself — all 12 agents, all 6 actions, all tools — requir
 5. **Structured LLM output** — Replace free-text agent responses with JSON Schema-constrained outputs (e.g. `qualification-extractor` returns `{"teamSize": 50, "useCase": "..."}`)
 6. **Prompt versioning** — Store system prompts as versioned artefacts so changes are tracked, rollbackable, and A/B testable without code deploys.
 7. **Parallel tool execution** — The ReAct loop currently runs tool calls sequentially. When an agent requests multiple tools, running them with `async/awaitAll` would reduce latency.
+8. **Background no-reply monitor** — When the agent sends an outreach or follow-up email and receives no reply within a configurable window (e.g. 48 hours), a background scheduled process should wake up and analyse why: was the email low-quality (run `email-reviewer` retroactively), did the lead never open it (integrate email-open tracking), or is the lead simply unresponsive? Based on the diagnosis, the system could automatically rewrite and resend a better email, escalate the silent lead for human review, or gracefully close it — so promising leads are never lost to a single unanswered message.
 
 ---
 
