@@ -20,6 +20,10 @@ class UpdateQualificationAction(private val ctx: OrchestratorContext) : Action {
     override suspend fun perform(agentId: String, args: Map<String, Any>): String {
         val lead = ctx.getLead() ?: return "Error: Lead not found."
 
+        val prevUseCase   = lead.useCase
+        val prevTeamSize  = lead.teamSize
+        val prevIntent    = lead.commercialIntent
+
         args["useCase"]?.toString()?.trim()?.takeIf { it.isNotEmpty() && it != "null" }
             ?.let { lead.useCase = it }
         args["teamSize"]?.toString()?.trim()?.toIntOrNull()
@@ -27,13 +31,16 @@ class UpdateQualificationAction(private val ctx: OrchestratorContext) : Action {
         args["commercialIntent"]?.toString()?.trim()
             ?.let { lead.commercialIntent = it.lowercase() in listOf("true", "yes", "1") }
 
-        ctx.saveLead(lead)
-        ctx.logEvent(Event.QualificationUpdated(
-            leadEmail = ctx.leadEmail,
-            useCase = lead.useCase,
-            teamSize = lead.teamSize,
-            commercialIntent = lead.commercialIntent
-        ))
+        val changed = lead.useCase != prevUseCase || lead.teamSize != prevTeamSize || lead.commercialIntent != prevIntent
+        if (changed) {
+            ctx.saveLead(lead)
+            ctx.logEvent(Event.QualificationUpdated(
+                leadEmail = ctx.leadEmail,
+                useCase = lead.useCase,
+                teamSize = lead.teamSize,
+                commercialIntent = lead.commercialIntent
+            ))
+        }
 
         return "Qualification updated for ${lead.name}: " +
             "useCase=${lead.useCase}, teamSize=${lead.teamSize}, commercialIntent=${lead.commercialIntent}"

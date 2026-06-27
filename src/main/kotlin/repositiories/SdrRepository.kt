@@ -16,6 +16,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.example.debug.DebugLogger
 import org.example.llm.LlmClient
+import org.example.llm.LlmClientPool
 import org.example.llm.LlmSendException
 import org.example.sdr.BookingLinkReason
 import org.example.sdr.Event
@@ -39,11 +40,12 @@ import org.example.sdr_orchestrator.SdrOrchestrator
  *    own isolated snapshot; [saveLead] atomically replaces the stored lead.
  */
 class SdrRepository(
-    private val llmClients: List<LlmClient>,
+    llmClients: List<LlmClient>,
     val emailRepository: EmailRepository,
     private val qualificationConfig: QualificationConfig
 ) {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val clientPool = LlmClientPool(llmClients)
 
     // ── Thread-safe storage ───────────────────────────────────────────────────
 
@@ -106,6 +108,12 @@ class SdrRepository(
 
     fun submitNewLead(lead: Lead) {
         scope.launch {
+            // Register the lead immediately — before competing for LLM resources.
+            // This guarantees the lead exists in _leads even if the LLM pool times out,
+            // so handleOrchestrationError can always send a fallback booking link.
+            save(lead)
+            logEvent(Event.LeadReceived(leadEmail = lead.email))
+
             leadMutex(lead.email).withLock {
                 tryWithAllClients(lead.email) { ctx ->
                     SdrOrchestrator(ctx).process(newLead = lead, messageText = lead.inboundMessage)
@@ -144,23 +152,41 @@ class SdrRepository(
         leadEmail: String,
         block: suspend (OrchestratorContext) -> Unit
     ) {
-        var lastLlmException: LlmSendException? = null
-        for (client in llmClients) {
+        // Systemic terminal-state guard — one check, covers every path (reply, resolve, retry).
+        // If the lead is already terminal no work should happen regardless of LLM availability.
+        val existing = _leads[leadEmail]
+        if (existing != null && existing.status.isTerminal) {
+            emitResult(leadEmail, "⛔ Lead '${existing.name}' is already in terminal state (${existing.status::class.simpleName}).")
+            return
+        }
+
+        // Try up to clientPool.size times.
+        // acquire() suspends until a client is free; returns null only when all are dead or
+        // none were configured — both mean we cannot process this lead with the LLM.
+        repeat(clientPool.size) {
+            val client = clientPool.acquire() ?: run {
+                handleOrchestrationError(leadEmail, Exception("No LLM clients available — all dead or none configured"))
+                return
+            }
+
+            var failed = false
             try {
                 block(createContext(leadEmail, client))
-                return
+                return  // success — we're done
             } catch (e: CancellationException) {
-                throw e  // coroutine contract — always re-throw immediately
+                throw e  // coroutine contract — always re-throw
             } catch (e: LlmSendException) {
-                DebugLogger.llmClientFailure(client::class.simpleName ?: "LLMClient", e.message)
-                lastLlmException = e
+                failed = true
+                // Client exhausted all its own retries — mark dead, acquire will pick the next one
             } catch (e: Exception) {
                 DebugLogger.orchestrationBug(leadEmail, e)
                 handleOrchestrationError(leadEmail, e)
                 return
+            } finally {
+                clientPool.release(client, failed = failed)
             }
         }
-        handleOrchestrationError(leadEmail, lastLlmException ?: Exception("All LLM clients failed"))
+        handleOrchestrationError(leadEmail, Exception("All LLM clients exhausted after ${clientPool.size} attempts"))
     }
 
     private suspend fun handleOrchestrationError(leadEmail: String, e: Exception) {

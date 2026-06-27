@@ -244,28 +244,93 @@ Human: "Forward this lead to sales"
 
 ## 5. Resilience & Email Quality
 
-LLM failure is a first-class operational concern, not an edge case.
+LLM failure is a first-class operational concern, not an edge case. The system is built in layers so that each layer handles what it can, and gracefully hands off to the next.
 
-**Layer 1 — BaseLlmClient:** HTTP 429 / 503 / IOException → retry up to 3× with exponential backoff. 400 / 401 / 403 (including invalid API key) → wrapped immediately as `LlmSendException`, no retry. Empty response → `LlmSendException`.
+---
 
-**Layer 2 — AiAgent:** `finally { clearHistory() }` always runs — even on timeout or exception.
+### Layer 1 — BaseLlmClient: per-request retry with exponential backoff
 
-**Layer 3 — SdrRepository.tryWithAllClients():** Tries each configured LLM client in sequence.
+Every LLM call goes through `executeWithRetry` before the result leaves the client:
+
+```
+Attempt 1 → fails (transient) → wait 5 s
+Attempt 2 → fails (transient) → wait 10 s
+Attempt 3 → fails (transient) → wait 20 s
+Attempt 4 → fails (transient) → wait 40 s
+Attempt 5 → fails             → throw LlmSendException  ← pool is notified
+```
+
+| Error type | Signal | Action |
+|---|---|---|
+| 429 Too Many Requests, 503, `IOException` | Transient | Retry with exponential backoff (up to 5×) |
+| 400 Bad Request, 401 Unauthorized, 403 Forbidden | Permanent | Fail immediately — no retry |
+| Empty response | Treated as failure | `LlmSendException` thrown |
+
+Only after all 5 attempts fail does the exception propagate to the pool — making a single client death relatively rare under normal load.
+
+---
+
+### Layer 2 — AiAgent: stateless cleanup
+
+`finally { clearHistory() }` always runs — even on exception or coroutine cancellation. Guarantees the agent is fully reset before it can be reused.
+
+---
+
+### Layer 3 — LlmClientPool: semaphore + permanent dead-marking
+
+```
+          Semaphore(N)        N = number of configured API keys
+               │
+     ┌─────────┴──────────┐
+  acquire()            release()
+  suspends if N=0       │
+     │              failed=false → Available, permit returned  (+1 to semaphore)
+  marks InUse       failed=true  → Dead ✝,  permit NOT returned (capacity shrinks permanently)
+```
+
+**Exclusive use:** each client is held by exactly one coroutine at a time. No two agents share a client simultaneously — no race conditions on the HTTP connection.
+
+**Why no coroutine waits forever:**
+
+A coroutine waiting on `semaphore.acquire()` is unblocked when any of these happen:
+
+1. **A successful client finishes** → `release(failed=false)` → permit returned → one waiter wakes
+2. **A client dies (the last one)** → `release(failed=true)` detects `deadCount == poolSize` → releases one "wake" permit → the first waiter detects all-dead, re-releases the permit (chain-signals the next), returns `null` — all waiters drain one-by-one
+
+`null` from `acquire()` → `handleOrchestrationError()` → fallback booking link + hardcoded farewell email, no LLM needed.
+
+---
+
+### Layer 4 — Terminal state guard: `LeadStatus.isTerminal`
+
+`LeadStatus` defines a single `isTerminal` property. `tryWithAllClients` checks it at the top before touching the pool:
+
+```kotlin
+if (existing != null && existing.status.isTerminal) { emitResult("⛔ already terminal"); return }
+```
+
+This means: if a lead has already been closed (qualified, disqualified, fallback sent, etc.) **any** subsequent message — whether from an angry user sending ten replies, a demo loop, or a retry — is silently rejected at one central point. No scattered per-status checks, no risk of a new status being forgotten.
 
 | Exception type | Action |
 |---|---|
 | `CancellationException` | Always re-thrown (coroutine contract) |
-| `LlmSendException` | Log failure, retry with next LLM client |
-| Any other `Exception` | Code bug — `orchestrationBug()` prints one red line (no stack trace), no retry |
+| `LlmSendException` | Client marked Dead; semaphore picks next waiter |
+| All clients dead / none configured | `acquire()` returns `null` → `handleOrchestrationError()` |
+| Lead already terminal | Short-circuit before touching the pool |
+| Any other `Exception` | Code bug — `orchestrationBug()` prints one red line, no retry |
 
-All clients fail → `handleOrchestrationError()` → fallback booking link created → **hardcoded farewell email sent directly (no LLM required)** → `ApprovedLlmFailed` → lead appears in `interventions`.
+---
+
+### Business continuity
+
+All retries exhausted → `handleOrchestrationError()` → fallback booking link → **hardcoded farewell email (no LLM required)** → `ApprovedLlmFailed` → visible under `interventions`.
+
+**Early lead registration:** `LeadReceived` is logged *before* the pool is touched. No lead can disappear due to an LLM failure — `handleOrchestrationError()` always finds the lead and can always run the fallback.
 
 ```bash
-# Multiple API keys = independent clients tried in sequence on failure
+# Each comma-separated key = one independent pool slot
 GOOGLE_API_KEY=key1,key2,key3
 ```
-
-**Business continuity guarantee:** In a total LLM outage, no lead is lost. Every affected lead receives a farewell email with a fallback booking link, and a sales rep can see them under `interventions`.
 
 ---
 

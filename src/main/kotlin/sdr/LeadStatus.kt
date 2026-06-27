@@ -5,8 +5,17 @@ package org.example.sdr
  *
  * [Escalated] carries the live escalation data so the status and its context
  * are always co-located; no separate nullable field needed on [Lead].
+ *
+ * [isTerminal] is the single authoritative source-of-truth for whether a lead
+ * may still receive new processing.  All guards in the pipeline derive from this flag.
  */
 sealed interface LeadStatus {
+    /**
+     * True when the lead has reached a final state and must not be processed further.
+     * Any new incoming message or retry for a terminal lead is a no-op.
+     */
+    val isTerminal: Boolean get() = this !is New && this !is AwaitingClientResponse && this !is Escalated
+
     /** Lead arrived, no outreach sent yet. */
     data object New : LeadStatus
 

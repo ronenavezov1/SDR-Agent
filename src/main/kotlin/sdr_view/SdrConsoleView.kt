@@ -54,7 +54,7 @@ class SdrConsoleView(private val viewModel: SdrViewModel) {
                     "inbox"         -> { println(viewModel.getInbox());           true }
                     "links"         -> { println(viewModel.getBookingLinks());    true }
                     "interventions" -> { println(viewModel.getLeadsNeedingIntervention()); true }
-                    "demo"          -> { println(viewModel.runDemo());            true }
+                    "demo"          -> { println(viewModel.runDemoAsync());            true }
                     "help"          -> { printWelcome();                          true }
                     "exit", "quit"  -> false
                     ""              -> true

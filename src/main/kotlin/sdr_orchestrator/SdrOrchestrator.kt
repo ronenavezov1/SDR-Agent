@@ -542,9 +542,12 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
 
         val lead: Lead
         if (isFirstMessage) {
-            lead = newLead
-            ctx.saveLead(lead)
-            ctx.logEvent(Event.LeadReceived(leadEmail = scopedLeadEmail))
+            // Lead is always saved (+ LeadReceived logged) by submitNewLead before
+            // tryWithAllClients is called — load it from the repo.
+            lead = ctx.getLead() ?: run {
+                ctx.emitResult("Error: Lead '$scopedLeadEmail' not found.")
+                return
+            }
 
             // Step 0 (new leads only): Spam gate — disqualify junk before touching anything else
             val spamResult = spamDetector.processInput(
@@ -565,18 +568,12 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
                 ctx.emitResult("Error: Lead '$scopedLeadEmail' not found.")
                 return
             }
-            when (val s = loaded.status) {
-                is LeadStatus.Escalated -> {
-                    ctx.emitResult("⛔ Lead is awaiting human review. Use: resolve $scopedLeadEmail  (reason: ${s.escalation.reason})")
-                    return
-                }
-                is LeadStatus.Qualified, is LeadStatus.Disqualified,
-                is LeadStatus.ApprovedLlmFailed, is LeadStatus.ApprovedClientAsk,
-                is LeadStatus.ApprovedSalesTeamAsk -> {
-                    ctx.emitResult("⛔ Lead is already in terminal state: ${loaded.status::class.simpleName}")
-                    return
-                }
-                else -> {}
+            // Terminal-state guard is enforced upstream in tryWithAllClients via LeadStatus.isTerminal.
+            // The Escalated check stays here because Escalated is not terminal — it needs a special message.
+            if (loaded.status is LeadStatus.Escalated) {
+                val s = loaded.status as LeadStatus.Escalated
+                ctx.emitResult("⛔ Lead is awaiting human review. Use: resolve $scopedLeadEmail  (reason: ${s.escalation.reason})")
+                return
             }
             loaded.emailThread.add(EmailMessage(EmailDirection.INBOUND, "Reply", messageText))
             ctx.saveLead(loaded)

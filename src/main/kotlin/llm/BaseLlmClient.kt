@@ -47,9 +47,9 @@ abstract class BaseLlmClient(
     private suspend fun executeWithRetry(
         agentId: String,
         payload: Any,
-        maxRetries: Int = 3
+        maxRetries: Int = 5
     ): LlmResponse {
-        var currentDelay = 1000L
+        var currentDelay = 5000L
 
         repeat(maxRetries) { attempt ->
             try {
