@@ -67,8 +67,8 @@ Now that we see the architecture, the next question is: **what happens when the 
 ### Layer 1: Retry with Exponential Backoff
 Each call gets up to 5 attempts with exponential backoff — delays of 2.5s → 5s → 10s → 10s (capped). Only known permanent errors (400, 401, 403) fail immediately. **Everything else is retried** — including rate limits, network errors, and any unexpected SDK exceptions.
 
-### Layer 2: LLM Client Pool
-Semaphore-based pool. A dead client is permanently marked and the next one takes over.
+### Layer 2: LLM Client Pool with Tiered Models
+Semaphore-based pool. Each slot holds **two models under the same API key** — `gemini-3.5-flash` (FAST tier) and `gemini-2.5-pro` (SMART tier). Agents declare their tier; the client routes to the right model automatically. A dead client is permanently marked and the next one takes over.
 
 ### Layer 3: Full Fallback
 All clients dead? The system creates a fallback booking link, sends a hardcoded email, and marks the lead as `ApprovedLlmFailed`. No LLM needed.
@@ -276,7 +276,7 @@ The architecture is built so that scaling means **swapping components, not rewri
 3. **Webhook receiver** — make the agent truly event-driven
 
 ### Medium Priority:
-4. **Tiered LLM models** — currently all agents use gemini-3.5-flash; next step is cheap model for spam filtering, powerful model for decisions
+4. **Tiered LLM models** — ✅ Implemented: FAST tier (`gemini-3.5-flash`) for binary decisions, SMART tier (`gemini-2.5-pro`) for reasoning. Both models share a single API key per pool slot. Next step: cross-provider tiering (different vendors per tier)
 5. **Structured LLM output** — JSON Schema instead of free-text
 6. **Background no-reply monitor** — a background process that wakes up when a lead doesn't reply, analyses why, and takes corrective action
 

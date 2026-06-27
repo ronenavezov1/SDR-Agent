@@ -18,7 +18,7 @@ fun main() = runBlocking {
         )
 
     val app  = AppRepository(
-        llmClients          = apiKeys.map { GeminiLlmClient(apiKey = it, modelName = "gemini-3.5-flash") },
+        llmClients          = apiKeys.map { GeminiLlmClient(apiKey = it) },
         qualificationConfig = QualificationConfig(minTeamSize = 10, maxFollowUps = 3)
     )
     val view = SdrConsoleView(viewModel = SdrViewModel(app))

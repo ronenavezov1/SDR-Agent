@@ -6,10 +6,13 @@ import org.example.agent.AgentCapability
 class OpenAiLlmClient(apiKey: String, modelName: String) :
     BaseLlmClient(providerName = "OpenAI", apiKey, modelName) {
 
+    override fun modelNameFor(tier: ModelTier): String = modelName
+
     override fun buildRequestPayload(
         system: String,
         history: List<AgentHistory>,
-        capabilities: List<AgentCapability>
+        capabilities: List<AgentCapability>,
+        tier: ModelTier
     ): Any {
         // כאן אתה כותב רק את הלוגיקה שממירה את ה-history למערך של role: "user"/"assistant"
         // ואת ה-capabilities ל-JSON Schema של OpenAI Tools

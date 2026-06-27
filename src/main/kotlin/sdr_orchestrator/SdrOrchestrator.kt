@@ -4,6 +4,7 @@ import org.example.agent.AgentConfig
 import org.example.agent.AiAgent
 import org.example.llm.LlmNonFatalException
 import org.example.llm.LlmSendException
+import org.example.llm.ModelTier
 import org.example.sdr.*
 import org.example.sdr_orchestrator.sdr_actions.CreateBookingLinkAction
 import org.example.sdr_orchestrator.sdr_actions.DisqualifyLeadAction
@@ -44,6 +45,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "outreach-writer",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.SMART,
         systemPrompt = """
             You are an SDR email writer. Your only job: compose one personalised outreach email for a new lead.
             Call getLeadState first to understand the lead.
@@ -67,6 +69,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "followup-writer",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.SMART,
         systemPrompt = """
             You write targeted follow-up emails to gather missing qualification information.
             Call getLeadState to see what is already known and what is still missing.
@@ -90,6 +93,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "email-reviewer",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.FAST,
         systemPrompt = """
             You are an email quality reviewer for an SDR team.
             You receive a draft email and decide whether it is ready to send to a real lead.
@@ -117,6 +121,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "email-sanity-checker",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.FAST,
         systemPrompt = """
             You are a last-resort email safety gate. The email has already gone through
             a strict quality reviewer but was not fully approved. Your job is NOT to
@@ -144,6 +149,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "farewell-writer",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.SMART,
         systemPrompt = """
             You write the final farewell email sent to a lead who has been qualified or handed
             off to the sales team. This is the last email they will receive from us.
@@ -171,6 +177,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "spam-detector",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.FAST,
         systemPrompt = """
             You decide whether an inbound lead message is a genuine business enquiry
             or spam / garbage that should be discarded immediately.
@@ -198,6 +205,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "initial-intent-checker",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.FAST,
         systemPrompt = """
             Single purpose: classify the intent of a lead's FIRST message — before any SDR email
             has been sent. Output exactly one of four tokens.
@@ -239,6 +247,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "escalation-detector",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.FAST,
         systemPrompt = """
             You analyse incoming lead messages for escalation triggers.
 
@@ -277,6 +286,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "qualification-extractor",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.FAST,
         systemPrompt = """
             You extract qualification data from a lead's incoming email reply.
             Call getLeadState first to see what is already known.
@@ -300,6 +310,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "lead-readiness",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.SMART,
         systemPrompt = """
             Single purpose: decide how to proceed after a lead's reply — three possible outcomes.
 
@@ -343,6 +354,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "info-sufficiency",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.SMART,
         systemPrompt = """
             You decide whether enough qualification data has been collected to make a final deal decision,
             given the remaining follow-up message budget.
@@ -375,6 +387,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         agentId      = "deal-decision",
         workOnId     = ctx.leadEmail,
         llmClient    = ctx.llmClient,
+        tier         = ModelTier.SMART,
         systemPrompt = """
             You make the final deal decision for a lead and act on it immediately.
             Steps: call getLeadState then checkQualification to assess the current data.

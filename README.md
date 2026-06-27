@@ -161,26 +161,24 @@ EMAIL WRITER CHAIN (shared):
 
 ### Agent Intelligence Configuration
 
-Each agent's "intelligence budget" is set independently via four parameters. Currently all agents share the same Gemini model — tiers are expressed through depth and history only. Plugging a stronger model into high-stakes agents (`deal-decision`, `followup-writer`) is a one-line config change per agent.
+Each agent's "intelligence budget" is set independently via four parameters. Each `GeminiLlmClient` slot in the pool carries **two models under the same API key** — a fast model for binary decisions and a smart model for reasoning. Agents declare their `tier` in config; the client routes accordingly. No orchestrator or agent code is aware of which model name is used.
 
-When an agent's history approaches `History Size`, it is **not dropped** — it is passed to the LLM for summarisation and replaced with a single compressed `Summary` entry. The agent retains the gist of everything it has seen without ballooning the context window.
+**Note on thinking models (`gemini-3.5-flash`, `gemini-2.5-pro`):** Both models are *thinking* models — each function call response includes an opaque `thought_signature` byte field that must be echoed back verbatim in the next request. If it is omitted, the API returns HTTP 400 immediately (no retry possible). The `GeminiLlmClient` captures `thoughtSignature` from each response `Part` and stores it in `AgentHistory.ToolCallRequest`; `toContents()` re-attaches it when replaying history. This is a provider-specific wire detail, handled transparently — no agent or orchestrator code is aware of it.
 
-**Note on `gemini-3.5-flash` (thinking model):** This model is a *thinking* model — each function call response includes an opaque `thought_signature` byte field that must be echoed back verbatim in the next request. If it is omitted, the API returns HTTP 400 immediately (no retry possible). The `GeminiLlmClient` captures `thoughtSignature` from each response `Part` and stores it in `AgentHistory.ToolCallRequest`; `toContents()` re-attaches it when replaying history. This is a provider-specific wire detail, but it is handled transparently — no agent or orchestrator code is aware of it.
-
-| Agent | Max Depth | History Size | Timeout | Tools | Actions | LLM Model (current) |
-|---|---|---|---|---|---|---|
-| `spam-detector` | 5 | 18 | 3 min | — | — | gemini-3.5-flash |
-| `initial-intent-checker` | 5 | 20 | 3 min | — | — | gemini-3.5-flash |
-| `email-sanity-checker` | 6 | 20 | 3 min | — | — | gemini-3.5-flash |
-| `email-reviewer` | 6 | 20 | 3 min | — | — | gemini-3.5-flash |
-| `lead-readiness` | 7 | 35 | 5 min | `getLeadState` | — | gemini-3.5-flash |
-| `qualification-extractor` | 7 | 26 | 5 min | `getLeadState` | `updateQualification` | gemini-3.5-flash |
-| `escalation-detector` | 7 | 30 | 5 min | `getLeadState` | `escalateToHuman` | gemini-3.5-flash |
-| `farewell-writer` | 7 | 30 | 5 min | `getLeadState` | — | gemini-3.5-flash |
-| `followup-writer` | 7 | 30 | 5 min | `getLeadState` | — | gemini-3.5-flash |
-| `info-sufficiency` | 9 | 32 | 5 min | `getLeadState`, `checkQualification` | — | gemini-3.5-flash |
-| `outreach-writer` | 9 | 32 | 10 min | `getLeadState` | — | gemini-3.5-flash |
-| `deal-decision` | 12 | 38 | 10 min | `getLeadState`, `checkQualification` | `createBookingLink`, `disqualifyLead` | gemini-3.5-flash |
+| Agent | Max Depth | History Size | Timeout | Tools | Actions | Tier | LLM Model |
+|---|---|---|---|---|---|---|---|
+| `spam-detector` | 5 | 18 | 3 min | — | — | FAST | gemini-3.5-flash |
+| `initial-intent-checker` | 5 | 20 | 3 min | — | — | FAST | gemini-3.5-flash |
+| `email-sanity-checker` | 6 | 20 | 3 min | — | — | FAST | gemini-3.5-flash |
+| `email-reviewer` | 6 | 20 | 3 min | — | — | FAST | gemini-3.5-flash |
+| `escalation-detector` | 7 | 30 | 5 min | `getLeadState` | `escalateToHuman` | FAST | gemini-3.5-flash |
+| `qualification-extractor` | 7 | 26 | 5 min | `getLeadState` | `updateQualification` | FAST | gemini-3.5-flash |
+| `lead-readiness` | 7 | 35 | 5 min | `getLeadState` | — | SMART | gemini-2.5-pro |
+| `farewell-writer` | 7 | 30 | 5 min | `getLeadState` | — | SMART | gemini-2.5-pro |
+| `followup-writer` | 7 | 30 | 5 min | `getLeadState` | — | SMART | gemini-2.5-pro |
+| `info-sufficiency` | 9 | 32 | 5 min | `getLeadState`, `checkQualification` | — | SMART | gemini-2.5-pro |
+| `outreach-writer` | 9 | 32 | 10 min | `getLeadState` | — | SMART | gemini-2.5-pro |
+| `deal-decision` | 12 | 38 | 10 min | `getLeadState`, `checkQualification` | `createBookingLink`, `disqualifyLead` | SMART | gemini-2.5-pro |
 
 `Max Depth` = maximum ReAct reasoning rounds before the agent is forced to answer. `History Size` = turns kept before summarisation triggers.
 
@@ -419,7 +417,7 @@ The agent pipeline itself — all 12 agents, all 6 actions, all tools — requir
 
 **Medium priority**
 
-4. **Tiered model intelligence** — Currently all 12 agents share the same single Gemini model. Intelligence tiers are expressed only through `maxDepth` (reasoning rounds) and `maxHistorySize` (context window) per agent. The natural next step is to back different agents with different models — a fast, cheap model for binary decisions (`spam-detector`, `email-sanity-checker`) and a more capable model for high-stakes reasoning (`deal-decision`, `followup-writer`). The `AgentConfig.llmClient` field already supports this; it is a configuration change, not an architectural one.
+4. **Tiered model intelligence** — Implemented: each `GeminiLlmClient` pool slot carries two models (`gemini-3.5-flash` for FAST-tier, `gemini-2.5-pro` for SMART-tier). The next step is supporting different providers per tier — e.g. a cheap OpenAI model for FAST and a powerful Gemini model for SMART — to maximise cost/quality tradeoffs across providers.
 5. **Structured LLM output** — Replace free-text agent responses with JSON Schema-constrained outputs (e.g. `qualification-extractor` returns `{"teamSize": 50, "useCase": "..."}`)
 6. **Prompt versioning** — Store system prompts as versioned artefacts so changes are tracked, rollbackable, and A/B testable without code deploys.
 7. **Parallel tool execution** — The ReAct loop currently runs tool calls sequentially. When an agent requests multiple tools, running them with `async/awaitAll` would reduce latency.

@@ -1,6 +1,7 @@
 package org.example.agent
 
 import org.example.llm.LlmClient
+import org.example.llm.ModelTier
 
 /**
  * Immutable configuration object for an [AiAgent].
@@ -38,5 +39,7 @@ data class AgentConfig(
     val actions: Map<String, Action> = emptyMap(),
     val timeoutMs: Long = 60_000L,
     val maxDepth: Int = 5,
-    val maxHistorySize: Int = 20
+    val maxHistorySize: Int = 20,
+    /** Intelligence tier this agent requires. FAST = cheap/quick model; SMART = powerful reasoning model. */
+    val tier: ModelTier = ModelTier.FAST
 )

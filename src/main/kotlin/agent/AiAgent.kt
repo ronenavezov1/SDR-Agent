@@ -100,14 +100,14 @@ class AiAgent(private val config: AgentConfig) {
             return "🚫 Agent '${config.agentId}' is busy ($statusDesc) and cannot accept new input.\n$historyDump"
         }
 
-        DebugLogger.agentStart(config.agentId, config.workOnId, config.llmClient.providerName, input)
+        DebugLogger.agentStart(config.agentId, config.workOnId, config.llmClient.modelNameFor(config.tier), input)
 
         _history.add(AgentHistory.UserInput(text = input))
         try {
             val result = withTimeout(config.timeoutMs.milliseconds) {
                 runReactLoop(depth = 0)
             }
-            DebugLogger.agentDone(config.agentId, config.workOnId, config.llmClient.providerName, _history.toList(), result)
+            DebugLogger.agentDone(config.agentId, config.workOnId, config.llmClient.modelNameFor(config.tier), _history.toList(), result)
             return result
         } finally {
             _history.clear()
@@ -180,7 +180,8 @@ class AiAgent(private val config: AgentConfig) {
                         Do NOT include greetings or filler. Be dense and factual.
                     """.trimIndent(),
                     history               = listOf<AgentHistory>(AgentHistory.UserInput(transcript)),
-                    availableCapabilities = emptyList()
+                    availableCapabilities = emptyList(),
+                    tier                  = config.tier
                 )
                 response.textReply?.trim()
                     ?: error("LLM returned no text for summarisation request.")
@@ -230,7 +231,8 @@ class AiAgent(private val config: AgentConfig) {
             agentId               = config.agentId,
             systemPrompt          = config.systemPrompt,
             history               = _history.takeLast(config.maxHistorySize),
-            availableCapabilities = capabilities
+            availableCapabilities = capabilities,
+            tier                  = config.tier
         )
 
         if (response.functionCalls.isNotEmpty()) {

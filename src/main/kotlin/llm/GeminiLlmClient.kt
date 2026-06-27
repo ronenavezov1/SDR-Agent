@@ -15,24 +15,38 @@ import kotlinx.coroutines.withContext
 import org.example.agent.AgentHistory
 import org.example.agent.AgentCapability
 
-class GeminiLlmClient(apiKey: String, modelName: String = "gemini-3.5-flash") :
-    BaseLlmClient(providerName = "Google Gemini", apiKey, modelName) {
+class GeminiLlmClient(
+    apiKey: String,
+    /** Fast, cheap model — used for FAST-tier agents (binary decisions, simple text). */
+    val fastModelName: String = "gemini-3.5-flash",
+    /** Powerful reasoning model — used for SMART-tier agents (multi-turn, high-stakes). */
+    val smartModelName: String = "gemini-2.5-pro"
+) : BaseLlmClient(
+    providerName = "Google Gemini",
+    apiKey       = apiKey,
+    modelName    = "$fastModelName / $smartModelName"
+) {
 
     private val client = Client.builder().apiKey(apiKey).build()
+
+    override fun modelNameFor(tier: ModelTier): String =
+        if (tier == ModelTier.SMART) smartModelName else fastModelName
 
     override fun buildRequestPayload(
         system: String,
         history: List<AgentHistory>,
-        capabilities: List<AgentCapability>
-    ): Any = GeminiPayload(system, history, capabilities)
+        capabilities: List<AgentCapability>,
+        tier: ModelTier
+    ): Any = GeminiPayload(system, history, capabilities, tier)
 
     @Throws(LlmSendException::class)
     override suspend fun executeNetworkCall(agentId: String, payload: Any): LlmResponse {
         val req = payload as GeminiPayload
+        val model = if (req.tier == ModelTier.SMART) smartModelName else fastModelName
         return withContext(Dispatchers.IO) {
             val contents = toContents(req.history)
             val config = buildConfig(req.system, req.capabilities)
-            val response = client.models.generateContent(modelName, contents, config)
+            val response = client.models.generateContent(model, contents, config)
 
             // Iterate parts directly so we can capture thoughtSignature alongside the function call.
             // Thinking models (gemini-2.5+) attach an opaque thoughtSignature to each function-call
@@ -171,6 +185,7 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-3.5-flash") :
     private data class GeminiPayload(
         val system: String,
         val history: List<AgentHistory>,
-        val capabilities: List<AgentCapability>
+        val capabilities: List<AgentCapability>,
+        val tier: ModelTier
     )
 }

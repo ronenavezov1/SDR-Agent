@@ -4,15 +4,27 @@ import org.example.agent.AgentHistory
 import org.example.agent.AgentCapability
 import kotlin.jvm.Throws
 
+/** Intelligence tier requested by an agent. */
+enum class ModelTier {
+    /** Fast, cheap model — binary decisions, simple text output (e.g. spam-detector, email-sanity-checker). */
+    FAST,
+    /** Powerful reasoning model — multi-turn analysis, high-stakes decisions (e.g. deal-decision, followup-writer). */
+    SMART
+}
+
 interface LlmClient {
     val providerName: String
+
+    /** Returns the concrete model name that will be used for [tier] — shown in debug logs. */
+    fun modelNameFor(tier: ModelTier): String
 
     @Throws(LlmSendException::class)
     suspend fun sendMessage(
         agentId: String,
         systemPrompt: String,
         history: List<AgentHistory>,
-        availableCapabilities: List<AgentCapability>
+        availableCapabilities: List<AgentCapability>,
+        tier: ModelTier = ModelTier.FAST
     ): LlmResponse
 }
 

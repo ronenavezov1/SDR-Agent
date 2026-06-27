@@ -22,9 +22,10 @@ abstract class BaseLlmClient(
         agentId: String,
         systemPrompt: String,
         history: List<AgentHistory>,
-        availableCapabilities: List<AgentCapability>
+        availableCapabilities: List<AgentCapability>,
+        tier: ModelTier
     ): LlmResponse {
-        val requestPayload = buildRequestPayload(systemPrompt, history, availableCapabilities)
+        val requestPayload = buildRequestPayload(systemPrompt, history, availableCapabilities, tier)
         val response = executeWithRetry(agentId, requestPayload)
 
         // Treat empty responses as failures so tryWithAllClients can try the next client
@@ -105,7 +106,8 @@ abstract class BaseLlmClient(
     protected abstract fun buildRequestPayload(
         system: String,
         history: List<AgentHistory>,
-        capabilities: List<AgentCapability>
+        capabilities: List<AgentCapability>,
+        tier: ModelTier
     ): Any
 
     @Throws(LlmSendException::class)
