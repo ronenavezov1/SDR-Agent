@@ -15,7 +15,7 @@ import kotlinx.coroutines.withContext
 import org.example.agent.AgentHistory
 import org.example.agent.AgentCapability
 
-class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
+class GeminiLlmClient(apiKey: String, modelName: String = "gemini-3.5-flash") :
     BaseLlmClient(providerName = "Google Gemini", apiKey, modelName) {
 
     private val client = Client.builder().apiKey(apiKey).build()
@@ -34,13 +34,21 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
             val config = buildConfig(req.system, req.capabilities)
             val response = client.models.generateContent(modelName, contents, config)
 
-            val funcCalls = (response.functionCalls() ?: emptyList<GenAiFunctionCall>()).map { fc ->
-                @Suppress("UNCHECKED_CAST")
-                (FunctionCall(
-                    functionName = fc.name().orElse(""),
-                    arguments = fc.args().orElse(emptyMap<String, Any>()) as Map<String, Any>
-                ))
-            }
+            // Iterate parts directly so we can capture thoughtSignature alongside the function call.
+            // Thinking models (gemini-2.5+) attach an opaque thoughtSignature to each function-call
+            // Part; it must be echoed back verbatim in the next request or the API returns 400.
+            val allParts = response.parts() ?: emptyList()
+            val funcCalls = allParts
+                .filter { it.functionCall().isPresent }
+                .map { part ->
+                    val fc = part.functionCall().get()
+                    @Suppress("UNCHECKED_CAST")
+                    FunctionCall(
+                        functionName = fc.name().orElse(""),
+                        arguments = fc.args().orElse(emptyMap<String, Any>()) as Map<String, Any>,
+                        thoughtSignature = part.thoughtSignature().orElse(null)
+                    )
+                }
 
             val textReply = if (funcCalls.isEmpty()) response.text()?.takeIf { it.isNotBlank() } else null
 
@@ -82,7 +90,9 @@ class GeminiLlmClient(apiKey: String, modelName: String = "gemini-2.5-flash") :
                             .name(req.toolName)
                             .args(req.arguments)
                             .build()
-                        parts += Part.builder().functionCall(fc).build()
+                        val partBuilder = Part.builder().functionCall(fc)
+                        req.thoughtSignature?.let { partBuilder.thoughtSignature(it) }
+                        parts += partBuilder.build()
                         i++
                     }
                     result += Content.builder().role("model").parts(parts).build()

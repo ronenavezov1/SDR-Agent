@@ -99,6 +99,11 @@ object DebugLogger {
         println("$YELLOW  ⚠️  [tryWithAllClients]  $clientName failed: ${errorMsg?.take(120)}$RESET")
     }
 
+    fun llmSendFailure(providerName: String, agentId: String, errorMsg: String) {
+        if (!enabled) return
+        println("$YELLOW  ❌  [$providerName]  Agent '$agentId' failed: ${errorMsg.take(200)}$RESET")
+    }
+
     /** Always visible — non-LLM exceptions indicate code bugs, not LLM failures. */
     fun orchestrationBug(leadEmail: String, e: Exception) {
         println("$RED🔴 [tryWithAllClients] Unexpected exception (${e::class.simpleName}) for $leadEmail: ${e.message}$RESET")

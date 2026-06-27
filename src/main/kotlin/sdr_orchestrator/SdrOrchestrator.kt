@@ -2,6 +2,7 @@ package org.example.sdr_orchestrator
 
 import org.example.agent.AgentConfig
 import org.example.agent.AiAgent
+import org.example.llm.LlmNonFatalException
 import org.example.llm.LlmSendException
 import org.example.sdr.*
 import org.example.sdr_orchestrator.sdr_actions.CreateBookingLinkAction
@@ -59,7 +60,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools   = mapOf("getLeadState" to GetLeadStateTool(ctx)),
         actions = emptyMap(),
-        maxDepth = 4, timeoutMs = 60_000L, maxHistorySize = 15
+        maxDepth = 9, timeoutMs = 600_000L, maxHistorySize = 32
     ))
 
     private val followUpWriter = AiAgent(AgentConfig(
@@ -82,7 +83,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools   = mapOf("getLeadState" to GetLeadStateTool(ctx)),
         actions = emptyMap(),
-        maxDepth = 3, timeoutMs = 45_000L, maxHistorySize = 15
+        maxDepth = 7, timeoutMs = 300_000L, maxHistorySize = 30
     ))
 
     private val emailReviewer = AiAgent(AgentConfig(
@@ -109,7 +110,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools    = emptyMap(),
         actions  = emptyMap(),
-        maxDepth = 2, timeoutMs = 20_000L, maxHistorySize = 5
+        maxDepth = 6, timeoutMs = 180_000L, maxHistorySize = 20
     ))
 
     private val emailSanityChecker = AiAgent(AgentConfig(
@@ -136,7 +137,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools    = emptyMap(),
         actions  = emptyMap(),
-        maxDepth = 2, timeoutMs = 15_000L, maxHistorySize = 5
+        maxDepth = 6, timeoutMs = 180_000L, maxHistorySize = 20
     ))
 
     private val farewellWriter = AiAgent(AgentConfig(
@@ -163,7 +164,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools   = mapOf("getLeadState" to GetLeadStateTool(ctx)),
         actions = emptyMap(),
-        maxDepth = 3, timeoutMs = 30_000L, maxHistorySize = 15
+        maxDepth = 7, timeoutMs = 300_000L, maxHistorySize = 30
     ))
 
     private val spamDetector = AiAgent(AgentConfig(
@@ -190,7 +191,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools    = emptyMap(),
         actions  = emptyMap(),
-        maxDepth = 1, timeoutMs = 15_000L, maxHistorySize = 3
+        maxDepth = 5, timeoutMs = 180_000L, maxHistorySize = 18
     ))
 
     private val initialIntentChecker = AiAgent(AgentConfig(
@@ -215,9 +216,12 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
               • There is no reasonable interpretation under which this could be a sales enquiry.
 
             DECIDE_NOW — respond with this (only if neither above applies) if:
-              • The lead has provided all three qualification fields in their first message:
-                use case (clear business problem), team size (explicit number), AND commercial
-                intent (active buying signal). All three must be present and unambiguous.
+              • The lead has EXPLICITLY provided ALL THREE qualification fields in their first message:
+                1. use case (clear business problem),
+                2. team size (explicit number), AND
+                3. commercial intent (active buying signal — e.g. "we have budget", "looking to purchase").
+              • All three must be present and unambiguous. If even ONE field is missing or unclear,
+                do NOT return DECIDE_NOW — return PROCEED instead so we can ask for the missing info.
 
             PROCEED — respond with this if none of the above applies:
               • The lead gave a normal introduction, a partial description, or just said "hi".
@@ -228,7 +232,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools    = emptyMap(),
         actions  = emptyMap(),
-        maxDepth = 1, timeoutMs = 15_000L, maxHistorySize = 5
+        maxDepth = 5, timeoutMs = 180_000L, maxHistorySize = 20
     ))
 
     private val escalationDetector = AiAgent(AgentConfig(
@@ -266,7 +270,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools   = mapOf("getLeadState" to GetLeadStateTool(ctx)),
         actions = mapOf("escalateToHuman" to EscalateToHumanAction(ctx)),
-        maxDepth = 3, timeoutMs = 30_000L, maxHistorySize = 15
+        maxDepth = 7, timeoutMs = 300_000L, maxHistorySize = 30
     ))
 
     private val qualificationExtractor = AiAgent(AgentConfig(
@@ -289,7 +293,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools   = mapOf("getLeadState" to GetLeadStateTool(ctx)),
         actions = mapOf("updateQualification" to UpdateQualificationAction(ctx)),
-        maxDepth = 3, timeoutMs = 30_000L, maxHistorySize = 10
+        maxDepth = 7, timeoutMs = 300_000L, maxHistorySize = 26
     ))
 
     private val leadReadiness = AiAgent(AgentConfig(
@@ -332,7 +336,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
         """.trimIndent(),
         tools    = mapOf("getLeadState" to GetLeadStateTool(ctx)),
         actions  = emptyMap(),
-        maxDepth = 3, timeoutMs = 20_000L, maxHistorySize = 20
+        maxDepth = 7, timeoutMs = 300_000L, maxHistorySize = 35
     ))
 
     private val infoSufficiency = AiAgent(AgentConfig(
@@ -346,9 +350,16 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
             Steps: call getLeadState and checkQualification, then respond with exactly ONE of:
 
               DISQUALIFY_NOW  — team_size is below the minimum OR commercial_intent is explicitly false.
-              DECIDE_NOW      — all three fields (use_case, team_size, commercial_intent) are known,
-                                OR remaining follow-ups = 0 (force a decision with whatever data exists).
-              NEEDS_MORE_INFO — at least one field is still missing AND follow-up budget remains.
+              DECIDE_NOW      — ALL three fields (use_case, team_size, commercial_intent) are known
+                                and not null, OR remaining follow-ups = 0 (force a decision with
+                                whatever data exists).
+              NEEDS_MORE_INFO — at least one field is still "NOT YET KNOWN" (null) AND follow-up
+                                budget remains. This is the PREFERRED response when data is missing
+                                — always give the lead a chance to provide info before disqualifying.
+
+            CRITICAL: if any field is null/unknown and follow-up budget > 0, you MUST return
+            NEEDS_MORE_INFO. Do NOT return DECIDE_NOW when fields are missing — that forces a
+            disqualification of potentially good leads.
 
             Respond with ONLY the token. No explanation, no extra text.
         """.trimIndent(),
@@ -357,7 +368,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
             "checkQualification" to CheckQualificationTool(ctx)
         ),
         actions  = emptyMap(),
-        maxDepth = 4, timeoutMs = 30_000L, maxHistorySize = 15
+        maxDepth = 9, timeoutMs = 300_000L, maxHistorySize = 32
     ))
 
     private val dealDecision = AiAgent(AgentConfig(
@@ -391,7 +402,7 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
             "createBookingLink" to CreateBookingLinkAction(ctx),
             "disqualifyLead" to DisqualifyLeadAction(ctx)
         ),
-        maxDepth = 5, timeoutMs = 60_000L, maxHistorySize = 20
+        maxDepth = 12, timeoutMs = 600_000L, maxHistorySize = 38
     ))
 
     // ── Draft helpers ─────────────────────────────────────────────────────────
@@ -470,11 +481,13 @@ class SdrOrchestrator(private val ctx: OrchestratorContext) {
             return Pair(subject, body)
         }
 
-        throw LlmSendException(
-            agentId       = "email-sanity-checker",
-            providerName  = ctx.llmClient::class.simpleName ?: "LLM",
-            modelName     = "unknown",
-            errorMessage  = "Draft for lead <$leadEmail> failed strict review after " +
+        // The LLM is working — all agents responded correctly — but the content
+        // quality was too low to pass review.  Throw LlmNonFatalException so the
+        // repository can apply its standard fallback (booking link + hardcoded email)
+        // WITHOUT killing the LLM client in the pool — the client is healthy.
+        throw LlmNonFatalException(
+            agentId      = "email-sanity-checker",
+            errorMessage = "Draft for lead <$leadEmail> failed strict review after " +
                 "${ctx.config.maxEmailDraftRetries} attempts and was rejected by the sanity checker. " +
                 "Reason: $sanityResult"
         )

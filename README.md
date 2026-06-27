@@ -167,18 +167,18 @@ When an agent's history approaches `History Size`, it is **not dropped** — it 
 
 | Agent | Max Depth | History Size | Timeout | Tools | Actions | LLM Model (current) |
 |---|---|---|---|---|---|---|
-| `spam-detector` | 1 | 3 | 15 s | — | — | gemini-2.5-flash |
-| `initial-intent-checker` | 1 | 5 | 15 s | — | — | gemini-2.5-flash |
-| `email-sanity-checker` | 2 | 5 | 15 s | — | — | gemini-2.5-flash |
-| `email-reviewer` | 2 | 5 | 20 s | — | — | gemini-2.5-flash |
-| `lead-readiness` | 3 | 20 | 20 s | `getLeadState` | — | gemini-2.5-flash |
-| `qualification-extractor` | 3 | 10 | 30 s | `getLeadState` | `updateQualification` | gemini-2.5-flash |
-| `escalation-detector` | 3 | 15 | 30 s | `getLeadState` | `escalateToHuman` | gemini-2.5-flash |
-| `farewell-writer` | 3 | 15 | 30 s | `getLeadState` | — | gemini-2.5-flash |
-| `followup-writer` | 3 | 15 | 45 s | `getLeadState` | — | gemini-2.5-flash |
-| `info-sufficiency` | 4 | 15 | 30 s | `getLeadState`, `checkQualification` | — | gemini-2.5-flash |
-| `outreach-writer` | 4 | 15 | 60 s | `getLeadState` | — | gemini-2.5-flash |
-| `deal-decision` | 5 | 20 | 60 s | `getLeadState`, `checkQualification` | `createBookingLink`, `disqualifyLead` | gemini-2.5-flash |
+| `spam-detector` | 5 | 18 | 3 min | — | — | gemini-3.5-flash |
+| `initial-intent-checker` | 5 | 20 | 3 min | — | — | gemini-3.5-flash |
+| `email-sanity-checker` | 6 | 20 | 3 min | — | — | gemini-3.5-flash |
+| `email-reviewer` | 6 | 20 | 3 min | — | — | gemini-3.5-flash |
+| `lead-readiness` | 7 | 35 | 5 min | `getLeadState` | — | gemini-3.5-flash |
+| `qualification-extractor` | 7 | 26 | 5 min | `getLeadState` | `updateQualification` | gemini-3.5-flash |
+| `escalation-detector` | 7 | 30 | 5 min | `getLeadState` | `escalateToHuman` | gemini-3.5-flash |
+| `farewell-writer` | 7 | 30 | 5 min | `getLeadState` | — | gemini-3.5-flash |
+| `followup-writer` | 7 | 30 | 5 min | `getLeadState` | — | gemini-3.5-flash |
+| `info-sufficiency` | 9 | 32 | 5 min | `getLeadState`, `checkQualification` | — | gemini-3.5-flash |
+| `outreach-writer` | 9 | 32 | 10 min | `getLeadState` | — | gemini-3.5-flash |
+| `deal-decision` | 12 | 38 | 10 min | `getLeadState`, `checkQualification` | `createBookingLink`, `disqualifyLead` | gemini-3.5-flash |
 
 `Max Depth` = maximum ReAct reasoning rounds before the agent is forced to answer. `History Size` = turns kept before summarisation triggers.
 
@@ -255,20 +255,20 @@ LLM failure is a first-class operational concern, not an edge case. The system i
 Every LLM call goes through `executeWithRetry` before the result leaves the client:
 
 ```
-Attempt 1 → fails (transient) → wait 5 s
-Attempt 2 → fails (transient) → wait 10 s
-Attempt 3 → fails (transient) → wait 20 s
-Attempt 4 → fails (transient) → wait 40 s
+Attempt 1 → fails (transient) → wait 2.5 s
+Attempt 2 → fails (transient) → wait 5 s
+Attempt 3 → fails (transient) → wait 10 s
+Attempt 4 → fails (transient) → wait 10 s  ← capped
 Attempt 5 → fails             → throw LlmSendException  ← pool is notified
 ```
 
 | Error type | Signal | Action |
 |---|---|---|
-| 429 Too Many Requests, 503, `IOException` | Transient | Retry with exponential backoff (up to 5×) |
 | 400 Bad Request, 401 Unauthorized, 403 Forbidden | Permanent | Fail immediately — no retry |
+| **Everything else** (429, 503, `IOException`, `RESOURCE_EXHAUSTED`, unknown) | Transient | Retry with exponential backoff (up to 5×, max 10 s per delay) |
 | Empty response | Treated as failure | `LlmSendException` thrown |
 
-Only after all 5 attempts fail does the exception propagate to the pool — making a single client death relatively rare under normal load.
+**Default-to-retry philosophy:** only known permanent errors (400/401/403) skip retries. Any unrecognised exception — including SDK-specific errors like `RESOURCE_EXHAUSTED` — is treated as transient and retried. This prevents a single unexpected error format from permanently killing a healthy client.
 
 ---
 

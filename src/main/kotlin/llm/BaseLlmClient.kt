@@ -47,21 +47,27 @@ abstract class BaseLlmClient(
     private suspend fun executeWithRetry(
         agentId: String,
         payload: Any,
-        maxRetries: Int = 5
+        maxRetries: Int = 5,
+        maxDelayMs: Long = 10_000L
     ): LlmResponse {
-        var currentDelay = 5000L
+        var currentDelay = 2500L
 
         repeat(maxRetries) { attempt ->
             try {
                 return executeNetworkCall(agentId, payload)
             } catch (e: Exception) {
-                val msg = e.message ?: ""
+                val msg = (e.message ?: "").lowercase()
 
                 // Permanent errors — fail immediately, no retry, but still wrap as LlmSendException
                 // so tryWithAllClients routes it correctly (not to orchestrationBug).
-                val isPermanent = msg.contains("400") || msg.contains("401") ||
-                                  msg.contains("403") || msg.contains("Unauthorized") ||
-                                  msg.contains("Bad Request")
+                // Use word-boundary-aware checks to avoid false positives (e.g. "1400" matching "400").
+                val isPermanent = Regex("\\b400\\b").containsMatchIn(msg) ||
+                                  Regex("\\b401\\b").containsMatchIn(msg) ||
+                                  Regex("\\b403\\b").containsMatchIn(msg) ||
+                                  msg.contains("unauthorized") ||
+                                  msg.contains("bad request") ||
+                                  msg.contains("invalid_argument") ||
+                                  msg.contains("permission_denied")
                 if (isPermanent) throw LlmSendException(
                     agentId = agentId,
                     providerName = providerName,
@@ -69,14 +75,13 @@ abstract class BaseLlmClient(
                     errorMessage = e.message ?: "Permanent error from $providerName"
                 )
 
-                // Transient errors — retry with backoff
-                val isTransient = msg.contains("429") || msg.contains("Too Many Requests") ||
-                                  msg.contains("503") || msg.contains("Service Unavailable") ||
-                                  e is IOException
-
-                if (isTransient && attempt < maxRetries - 1) {
-                    DebugLogger.llmRetry(providerName, msg, currentDelay, attempt + 1, maxRetries)
-                    delay(currentDelay.milliseconds)
+                // Everything else is treated as transient — retry with backoff.
+                // This covers 429, 503, IOException, RESOURCE_EXHAUSTED, quota errors,
+                // and any unexpected errors. Only known permanent errors skip retries.
+                if (attempt < maxRetries - 1) {
+                    val delayMs = minOf(currentDelay, maxDelayMs)
+                    DebugLogger.llmRetry(providerName, msg, delayMs, attempt + 1, maxRetries)
+                    delay(delayMs.milliseconds)
                     currentDelay *= 2
                 } else {
                     throw LlmSendException(

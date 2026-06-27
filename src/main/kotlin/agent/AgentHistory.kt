@@ -25,6 +25,8 @@ sealed interface AgentHistory {
     data class ToolCallRequest(
         val toolName: String,
         val arguments: Map<String, Any>,
+        /** Opaque bytes from thinking models — must be echoed back when replaying history. */
+        val thoughtSignature: ByteArray? = null,
         override val id: String = UUID.randomUUID().toString(),
         override val timestamp: Long = System.currentTimeMillis()
     ) : AgentHistory

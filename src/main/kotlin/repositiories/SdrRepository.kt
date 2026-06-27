@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.withLock
 import org.example.debug.DebugLogger
 import org.example.llm.LlmClient
 import org.example.llm.LlmClientPool
+import org.example.llm.LlmNonFatalException
 import org.example.llm.LlmSendException
 import org.example.sdr.BookingLinkReason
 import org.example.sdr.Event
@@ -174,8 +175,15 @@ class SdrRepository(
                 return  // success — we're done
             } catch (e: CancellationException) {
                 throw e  // coroutine contract — always re-throw
+            } catch (e: LlmNonFatalException) {
+                // The LLM client is healthy — the output quality was insufficient.
+                // Do NOT mark the client as dead; just trigger the standard fallback.
+                DebugLogger.orchestrationBug(leadEmail, e)
+                handleOrchestrationError(leadEmail, e)
+                return
             } catch (e: LlmSendException) {
                 failed = true
+                DebugLogger.llmSendFailure(e.providerName, e.agentId, e.errorMessage)
                 // Client exhausted all its own retries — mark dead, acquire will pick the next one
             } catch (e: Exception) {
                 DebugLogger.orchestrationBug(leadEmail, e)

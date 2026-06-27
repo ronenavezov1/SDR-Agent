@@ -238,7 +238,7 @@ class AiAgent(private val config: AgentConfig) {
                 response.functionCalls.joinToString(", ") { it.functionName }
             )
             response.functionCalls.forEach { call ->
-                _history.add(AgentHistory.ToolCallRequest(call.functionName, call.arguments))
+                _history.add(AgentHistory.ToolCallRequest(call.functionName, call.arguments, call.thoughtSignature))
             }
             val results = response.functionCalls.map { call -> executeCapabilitySafely(call) }
             results.forEach { _history.add(it) }
