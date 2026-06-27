@@ -95,6 +95,8 @@ SdrRepository receives a trigger for lead@x.com
 
 **Every agent starts with full context — never blind.** Because agents are stateless, each receives a complete snapshot via `lead.toContextString()`: current status, all qualification fields, the full email thread (as a clean conversation), and the entire event history. The agent does not need memory — it reads everything fresh from the repository on each call.
 
+**Duplicate-email / clean-restart policy.** If a new lead arrives with an email that is already being processed, the per-lead Mutex serialises them: the incoming request waits until the current pipeline finishes, then overwrites the lead and starts a fresh conversation. This handles two real scenarios: a user who corrected a typo in their email, or a returning prospect who wants to restart from scratch. No special-casing is needed — the Mutex alone enforces the correct ordering.
+
 ---
 
 ## 3. Multi-Agent Pipeline

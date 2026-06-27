@@ -109,20 +109,13 @@ class SdrRepository(
     fun submitNewLead(lead: Lead) {
         scope.launch {
             leadMutex(lead.email).withLock {
-                if (_leads.containsKey(lead.email)) {
-                    // Same email already exists — treat the inbound message as a reply
-                    // rather than creating a duplicate lead and risking state corruption.
-                    tryWithAllClients(lead.email) { ctx ->
-                        SdrOrchestrator(ctx).process(messageText = lead.inboundMessage)
-                    }
-                } else {
-                    // Register the lead before touching the LLM pool so that
-                    // handleOrchestrationError can always find it and run the fallback path.
-                    save(lead)
-                    logEvent(Event.LeadReceived(leadEmail = lead.email))
-                    tryWithAllClients(lead.email) { ctx ->
-                        SdrOrchestrator(ctx).process(newLead = lead, messageText = lead.inboundMessage)
-                    }
+                // The mutex guarantees any in-flight processing for this email has fully
+                // completed before we reach here. Then we overwrite with the fresh lead
+                // and start a new conversation — clean restart policy.
+                save(lead)
+                logEvent(Event.LeadReceived(leadEmail = lead.email))
+                tryWithAllClients(lead.email) { ctx ->
+                    SdrOrchestrator(ctx).process(newLead = lead, messageText = lead.inboundMessage)
                 }
             }
         }
