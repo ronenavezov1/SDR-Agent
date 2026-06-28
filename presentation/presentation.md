@@ -4,13 +4,36 @@
 
 ---
 
+## The Problem
+
+Every day, sales teams receive hundreds of inbound messages.
+
+Most of them are spam. Some are real leads — but buried inside vague, incomplete emails that say things like *"interested in your product, let me know."*
+
+A human SDR has to open every single one, read it, decide if it's worth their time, write a reply, wait for a response, and repeat — for every lead, every day.
+
+That's slow. It's expensive. And good leads fall through the cracks while the team is busy with the noise.
+
+**The question is: can we automate this — without losing control over who actually gets a booking link?**
+
+---
+
 ## The Core Idea
 
-> **"Good architecture is stable, easy to extend, and easy to change policies."**
+This system is built around two principles.
 
-This system filters thousands of inbound leads automatically. It separates spam from real prospects, qualifies the good ones, and surfaces them to sales reps — ready for a meeting.
+**Principle 1 — Good architecture.**
+> *"Stable, easy to extend, and easy to change policies."*
 
-If every LLM in the world goes down? The system keeps running. Every lead is saved, and sales reps go back to sorting manually. **The system never stops working.**
+The business rules live in Kotlin code. The LLM is just a tool — like a database or an email service. You can swap it, replace it, or remove it. The core logic doesn't move.
+
+**Principle 2 — Never depend on the LLM to stay alive.**
+
+> *What if every LLM in the world goes down tonight?*
+
+The system doesn't crash. It doesn't lose leads. It sends a hardcoded farewell email with a booking link — no AI needed — and puts the lead in a manual review queue. Sales reps take over. **Every lead is saved. The system never stops.**
+
+This is called **Graceful Failure** — and it's built in from day one, not added later.
 
 ---
 
@@ -29,9 +52,13 @@ If all LLM providers fail, the system sends a hardcoded farewell email with a bo
 
 ## System Architecture — MVI
 
-> This is the heart of the system. Let me walk you through it.
+> Let's start with the macro view — to see how the system works technically. Then we'll dive into the micro view — to look at the agent's decisions and how its flow works.
 
 ![MVI System Architecture Diagram](MVI%20System%20Architecture%20Diagram.png)
+
+When a lead arrives, the **Repository** spawns an **Orchestrator** and assigns it an LLM client. The Orchestrator runs asynchronously — with a lock on the lead's email address, so two Orchestrators can never process the same lead at the same time. Each LLM client is dedicated to one Orchestrator at a time.
+
+Inside the Orchestrator, **sub-agents run synchronously** — one at a time, in order. Each sub-agent sends a request to the LLM — along with its tools and conversation history. The LLM may respond with a tool call or an action. The agent executes it, returns the result to the LLM, and the loop continues until the LLM gives a final answer. Only then does the sub-agent return, and the next one begins.
 
 ![Class Diagram: MVI Architecture](Class%20Diagram%3A%20MVI%20Architecture.png)
 
@@ -151,6 +178,8 @@ Now we move from the technical foundation to the business logic. The orchestrato
 
 ![Activity Diagram: Orchestration](Activity%20Diagram%3A%20Orchestration.png)
 
+![Layered Architecture: Sub-Agents Capability Map](Layered%20Architecture%3A%20Sub-Agents%20Capability%20Map.png)
+
 ![Class Diagram: Orchestration](Class%20Diagram%3A%20Orchestration.png)
 
 ### `OrchestratorContext` — least-privilege access:
@@ -184,8 +213,6 @@ The orchestrator itself is stateless — just like every agent inside it. It rec
 
 ## Agent Map — Each Agent's Purpose
 
-![Layered Architecture: Sub-Agents Capability Map](Layered%20Architecture%3A%20Sub-Agents%20Capability%20Map.png)
-
 ![Class Diagram: Sub-Agent Definitions](Class%20Diagram%3A%20Sub-Agent%20Definitions.png)
 
 | Agent | What it decides | Why it's separate |
@@ -215,6 +242,16 @@ val hasAllFields = lead.useCase != null &&
 ```
 - **Pricing = immediate escalation** — no prompt can override this
 - **Farewell email always sent** — even if the LLM fails (hardcoded template)
+
+### No infinite loops — ever:
+- **Email writer/reviewer cycle** — capped at `maxEmailDraftRetries`. If the reviewer keeps rejecting, the sanity checker gets the last word, and if that fails too — Graceful Failure. The loop cannot run forever.
+- **Follow-up cap** — after `maxFollowUps` emails with no decision, the system forces `DECIDE_NOW` regardless of missing data. The pipeline always terminates.
+- **Per-agent max depth** — each sub-agent has a `maxDepth` limit. If the LLM keeps calling tools without giving a final answer, the loop is cut off.
+- **Per-agent timeout** — total execution time per agent is capped. If the LLM hangs, the agent is cancelled.
+- **LLM retry cap** — each LLM call gets a fixed number of retries with exponential backoff. After that, the client is marked dead and the next one takes over.
+
+### Sales rep override — only through the escalation pipeline:
+`ApprovedSalesTeamAsk` can only be triggered from inside `resolveEscalation()` — the function that processes a human's explicit response to an open escalation. There is no other code path that sets this status. The LLM cannot reach it, a lead reply cannot reach it. Only a sales rep's deliberate response to an escalation ticket unlocks it.
 
 ### Five terminal states — four different booking-link URLs:
 
