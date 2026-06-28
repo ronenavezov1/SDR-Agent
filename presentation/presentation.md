@@ -8,7 +8,7 @@
 
 Every day, sales teams receive hundreds of inbound messages.
 
-Most of them are spam. Some are real leads — but buried inside vague, incomplete emails that say things like *"interested in your product, let me know."*
+Most of them are spam. Some are real leads — but buried inside unclear, incomplete emails that say things like *"interested in your product, let me know."*
 
 A human SDR has to open every single one, read it, decide if it's worth their time, write a reply, wait for a response, and repeat — for every lead, every day.
 
@@ -102,6 +102,10 @@ All clients dead? The system creates a fallback booking link, sends a hardcoded 
 
 **Important:** `LeadReceived` is logged *before* the pool is touched — so no lead can vanish due to an LLM failure.
 
+**No Deadlock by Design:** Lock ordering is fixed — the orchestrator always locks the **lead** first, then acquires an **LLM client** from the pool. Since every coroutine follows the same order, circular wait is impossible and deadlocks cannot occur.
+
+**Graceful Failure:** If all LLM clients crash, waiting orchestrators don't sleep forever. The pool uses chain-signalling: the last dying client releases one semaphore permit, which wakes a waiting coroutine; that coroutine detects all-dead, re-releases the permit to wake the next waiter, and so on. Every orchestrator wakes up, receives `null`, and falls through to Layer 3 (fallback email + `ApprovedLlmFailed`) — a clean, graceful failure.
+
 ---
 
 ## How an Agent Works — The ReAct Loop
@@ -136,6 +140,50 @@ After the agent finishes — whether it succeeded or failed — `finally { clear
 - **History window** — the auto-summarization described above prevents the context from growing unbounded.
 
 Every one of the 12 agents uses this exact same mechanism.
+
+---
+
+### The ReAct Loop: What the LLM Sees
+
+**1. First Call (Optimized):**
+The agent sends the LLM a prompt that is often "pre-loaded" with context to save a turn:
+- **System Prompt:** "You are a qualification extractor..."
+- **Available Tools:** `getLeadState`, `updateQualification`
+- **Pre-loaded Context:** "Here is the current state of the lead: { team_size: 50, ... }"
+- **User Input:** "Your task is to extract new information from this message: '...'"
+
+This **proactive context injection** saves the LLM from having to call `getLeadState` itself, saving one full loop cycle.
+
+**2. N-th Call (With History):**
+If the LLM needs more information, its next prompt includes the full history of its own thought process:
+- **System Prompt** (same as before)
+- **Available Tools** (same as before)
+- **Full History:**
+    - User Input: "..."
+    - Agent Thought: "I need to check the lead's qualification status."
+    - Tool Call: `checkQualification()`
+    - Tool Result: "{ use_case: 'known', team_size: 'known', commercial_intent: 'unknown' }"
+- **New Request:** "You have 2 steps remaining. What is your next thought or final answer?"
+
+Notice the two key details: the full history provides memory, and the "steps remaining" hint encourages the LLM to converge on a final answer instead of looping indefinitely. The `maxDepth` limit itself is still enforced in Kotlin as a hard guardrail.
+
+---
+
+### History vs. Events: Two Levels of Memory
+
+The system uses two different kinds of "memory" for different purposes.
+
+**Agent `History`:**
+- **What it is:** A temporary, in-memory log of a single agent's thought process *during one request*.
+- **Scope:** Private to one `AiAgent` instance.
+- **Lifecycle:** Created when the agent starts, **cleared** completely when the agent finishes.
+- **Purpose:** Allows the agent to "reason" step-by-step within a single ReAct loop (e.g., "I called this tool, got this result, so my next step is..."). It's the agent's short-term memory.
+
+**Lead `Events`:**
+- **What it is:** A permanent, append-only log of meaningful business outcomes for a lead.
+- **Scope:** Attached to the `Lead` object, persisted in the database.
+- **Lifecycle:** Lives forever with the lead.
+- **Purpose:** Provides the long-term, auditable source of truth for a lead's entire journey. Examples: `LeadReceived`, `EmailSent`, `HumanEscalationTriggered`, `BookingLinkCreated`. It's the system's long-term memory.
 
 ---
 
@@ -198,16 +246,37 @@ The orchestrator itself is stateless — just like every agent inside it. It rec
 ![Activity Diagram: Lead Processing Pipelines](Activity%20Diagram%3A%20Lead%20Processing%20Pipelines.png)
 
 ### New Lead Flow:
-1. `spam-detector` — Is this real or spam?
-2. `qualification-extractor` — Pull out use_case, team_size, commercial_intent
-3. `escalation-detector` — Did they mention pricing, contracts, or competitors?
-4. `initial-intent-checker` — Do they want a human? Is there enough info? Should we proceed?
+1. `spam-detector` — Is this real or spam? → SPAM → disqualify and exit
+2. `qualification-extractor` — Pull out use_case, team_size, commercial_intent from the message
+3. `escalation-detector` — Did they mention pricing, contracts, or competitors? → ESCALATED → escalate and exit
+4. `initial-intent-checker` — Classify the lead's first-message intent:
+   - `CLIENT_WANTS_HUMAN` → `farewell-writer` + booking link → exit
+   - `IRRELEVANT` → disqualify → exit
+   - `DECIDE_NOW` → `deal-decision` → (if qualified) `farewell-writer` → exit
+   - `PROCEED` → continue ↓
 5. `info-sufficiency` — Enough data to make a final decision?
-6. `deal-decision` / `outreach-writer` — Qualify, disqualify, or send a follow-up email
-7. `farewell-writer` — Final email with a booking link
+   - `DISQUALIFY_NOW` / `DECIDE_NOW` → `deal-decision` → (if qualified) `farewell-writer` → exit
+   - `NEEDS_MORE_INFO` → continue ↓
+6. `outreach-writer` → `email-reviewer` → (if rejected: retry → `email-sanity-checker`) → send outreach email
 
 ### Reply Flow:
-`qualification-extractor` → `escalation-detector` → `lead-readiness` → `info-sufficiency` → `deal-decision` / `followup-writer` → `farewell-writer`
+1. `qualification-extractor` — Extract new data from the reply
+2. `escalation-detector` — Escalation triggers? → ESCALATED → escalate and exit
+3. `lead-readiness` — Analyse lead behaviour across the full conversation:
+   - `CLIENT_WANTS_HUMAN` → `farewell-writer` + booking link → exit
+   - `DECIDE_NOW` → `deal-decision` → (if qualified) `farewell-writer` → exit
+   - `GATHER_MORE` → continue ↓
+4. `info-sufficiency` — Enough data to decide?
+   - `DISQUALIFY_NOW` / `DECIDE_NOW` → `deal-decision` → (if qualified) `farewell-writer` → exit
+   - `NEEDS_MORE_INFO` → continue ↓
+5. `followup-writer` → `email-reviewer` → (if rejected: retry → `email-sanity-checker`) → send follow-up email
+
+### Resolve Escalation Flow:
+1. `info-sufficiency` — Interpret the human's response + check data state:
+   - `DECIDE_NOW` + all fields present → `deal-decision` → (if qualified) `farewell-writer` → exit
+   - `DECIDE_NOW` + fields missing → `ApprovedSalesTeamAsk` + `farewell-writer` → exit (no `deal-decision`)
+   - `NEEDS_MORE_INFO` → continue ↓
+2. `followup-writer` → `email-reviewer` → (if rejected: `email-sanity-checker`) → send follow-up relaying the human's answer
 
 ---
 
@@ -220,8 +289,15 @@ The orchestrator itself is stateless — just like every agent inside it. It rec
 | `spam-detector` | `REAL` / `SPAM` | Saves tokens — no point processing junk |
 | `qualification-extractor` | Extracts qualification fields | Runs early — saves data even if the pipeline stops |
 | `escalation-detector` | `SAFE` / `ESCALATED` | Hard rule — pricing always goes to a human |
+| `initial-intent-checker` | `PROCEED` / `IRRELEVANT` / `DECIDE_NOW` / `CLIENT_WANTS_HUMAN` | Fast filter on the first message — avoids wasting follow-ups on irrelevant or human-bound leads |
+| `lead-readiness` | `GATHER_MORE` / `DECIDE_NOW` / `CLIENT_WANTS_HUMAN` | Analyses lead **behaviour** over the full conversation — detects stalled or hostile leads |
+| `info-sufficiency` | `NEEDS_MORE_INFO` / `DECIDE_NOW` / `DISQUALIFY_NOW` | The only agent that checks **data vs. business rules** — catches small teams early, avoids unnecessary follow-ups |
 | `deal-decision` | Qualify / Disqualify | **The only agent** that can create a booking link |
+| `outreach-writer` | Writes the first outreach email | Personalised opening — needs SMART model for quality |
+| `followup-writer` | Writes follow-up emails | Asks exactly one missing-field question per email |
+| `farewell-writer` | Writes the closing email with booking link | Last touch — has a hardcoded fallback if the LLM fails |
 | `email-reviewer` | `APPROVED` / `REJECTED` | Quality gate — catches bad or generic emails |
+| `email-sanity-checker` | `SEND` / `FAIL` | Last-resort safety net — ensures the email won't embarrass the company |
 
 ### Why this order matters:
 - `qualification-extractor` runs before escalation — so `"1,000 engineers, need a discount"` saves `teamSize=1000` even if escalated immediately.
@@ -335,4 +411,3 @@ The architecture is built so that scaling means **swapping components, not rewri
 ## Questions?
 
 > The code, diagrams, and full documentation are all in the README.
-
