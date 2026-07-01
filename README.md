@@ -1,4 +1,4 @@
-# AI SDR Agent — monday.com RevAI Engineering Challenge
+# AI SDR Agent
 
 > An autonomous, multi-agent Sales Development Representative that qualifies or disqualifies inbound leads through personalised email conversations — with zero lead leakage.
 
