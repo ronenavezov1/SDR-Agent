@@ -1,9 +1,5 @@
 # AI SDR Agent — Autonomous Lead Qualification
 
-### monday.com RevAI Engineering Challenge
-
----
-
 ## The Problem
 
 Every day, sales teams receive hundreds of inbound messages.
